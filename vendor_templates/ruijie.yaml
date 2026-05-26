@@ -1,0 +1,40 @@
+vendor: Ruijie
+netmiko_type: ruijie_os
+remote_dir: "flash:/"
+
+pre_check:
+  - command: show patch
+    key: patch_info
+  - command: show cpu
+    key: cpu
+  - command: show memory
+    key: memory
+  - command: show inventory
+    key: device
+
+activate:
+  - command: "patch install flash:/{patch_file}"
+    description: 安装并激活补丁
+
+post_check:
+  - command: show patch
+    key: patch_info
+  - command: show cpu
+    key: cpu
+  - command: show memory
+    key: memory
+
+rollback:
+  - command: "patch remove {patch_id}"
+    description: 移除补丁
+  - command: "delete flash:/{patch_file}"
+    description: 删除补丁文件
+
+save: write
+patch_id_pattern: "Patch name:\\s*(\\S+)"
+error_patterns:
+  - "% Invalid input"
+  - "% Incomplete command"
+  - "% Ambiguous command"
+  - "% Error"
+md5_command: "verify flash:/{patch_file}"

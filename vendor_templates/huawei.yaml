@@ -1,0 +1,46 @@
+vendor: Huawei
+netmiko_type: huawei
+remote_dir: "flash:/"
+
+pre_check:
+  - command: display patch information
+    key: patch_info
+  - command: display cpu-usage
+    key: cpu
+  - command: display memory-usage
+    key: memory
+  - command: display device
+    key: device
+
+activate:
+  - command: "patch install {patch_file} flash:/"
+    description: 安装补丁
+  - command: "patch activate {patch_id}"
+    description: 激活补丁
+
+post_check:
+  - command: display patch information
+    key: patch_info
+  - command: display cpu-usage
+    key: cpu
+  - command: display memory-usage
+    key: memory
+
+rollback:
+  - command: "patch deactivate {patch_id}"
+    description: 去激活补丁
+  - command: "patch delete {patch_id}"
+    description: 删除补丁
+  - command: "delete flash:/{patch_file}"
+    description: 删除补丁文件
+
+save: save
+patch_id_pattern: "Patch name:\\s*(\\S+)"
+error_patterns:
+  - "Error"
+  - "Unrecognized command"
+  - "Incomplete command"
+  - "Ambiguous command"
+  - "Wrong parameter"
+  - "Failed"
+md5_command: "dir flash:/{patch_file}"

@@ -1,0 +1,6 @@
+netmiko>=4.2.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+pyyaml>=6.0
+tftpy>=0.7.2
+paramiko>=3.0.0

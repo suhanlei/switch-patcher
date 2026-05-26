@@ -1,0 +1,47 @@
+vendor: H3C
+netmiko_type: hp_comware
+remote_dir: "flash:/"
+
+pre_check:
+  - command: display patch information
+    key: patch_info
+  - command: display cpu-usage
+    key: cpu
+  - command: display memory
+    key: memory
+  - command: display device
+    key: device
+
+activate:
+  - command: "install activate patch flash:/{patch_file}"
+    description: 激活补丁
+  - command: install commit
+    description: 确认补丁
+
+post_check:
+  - command: display patch information
+    key: patch_info
+  - command: display cpu-usage
+    key: cpu
+  - command: display memory
+    key: memory
+
+rollback:
+  - command: "install deactivate patch flash:/{patch_file}"
+    description: 去激活补丁
+  - command: install commit
+    description: 确认去激活
+  - command: "delete flash:/{patch_file}"
+    description: 删除补丁文件(可选)
+
+save: save force
+patch_id_pattern: "Patch name:\\s*(\\S+)"
+error_patterns:
+  - "Error"
+  - "Unrecognized command"
+  - "Incomplete command"
+  - "Ambiguous command"
+  - "Wrong parameter"
+  - "Failed to"
+  - "No such file"
+md5_command: "md5sum flash:/{patch_file}"
