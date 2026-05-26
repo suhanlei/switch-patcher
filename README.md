@@ -50,6 +50,7 @@ switch-patcher/
 │   └── ruijie.yaml               # 锐捷补丁命令流程
 ├── patches/                      # 补丁文件存放目录（使用前将补丁文件放入此处）
 ├── patch_config.yaml             # 执行配置文件（Excel路径、Sheet、用户名密码等）
+├── patch_hosts_template.xlsx      # Excel模板文件
 ├── requirements.txt              # Python依赖清单
 └── .gitignore
 ```
@@ -66,79 +67,31 @@ switch-patcher/
 
 ### 1. Python版本
 
-需要 Python 3.12+。确认版本：
+Python 3.10+
+
+### 2. 创建虚拟环境并安装依赖
 
 ```bash
-python --version
-```
-
-### 2. 克隆项目
-
-```bash
-git clone https://github.com/suhanlei/switch-patcher.git
 cd switch-patcher
-```
-
-### 3. 创建虚拟环境
-
-```bash
 python -m venv venv
-```
 
-### 4. 激活虚拟环境
-
-Windows CMD：
-
-```cmd
+# Windows
 venv\Scripts\activate
-```
+# Linux/macOS
+source venv/bin/activate
 
-Windows PowerShell：
-
-```powershell
-venv\Scripts\Activate.ps1
-```
-
-Git Bash / MSYS2 / Linux / macOS：
-
-```bash
-source venv/Scripts/activate   # Windows Git Bash
-source venv/bin/activate       # Linux/macOS
-```
-
-激活后命令行提示符会显示 `(venv)` 前缀，表示虚拟环境已激活。
-
-### 5. 安装依赖
-
-```bash
 pip install -r requirements.txt
 ```
 
-依赖列表：
+### 3. 验证安装
 
-| 包 | 版本 | 用途 |
-|---|---|---|
-| netmiko | >= 4.2.0 | SSH连接交换机，自动处理厂商CLI差异 |
-| paramiko | >= 3.0.0 | SFTP文件传输通道 |
-| pandas | >= 2.0.0 | 数据处理 |
-| openpyxl | >= 3.1.0 | Excel文件读写 |
-| pyyaml | >= 6.0 | YAML厂商模板解析 |
-| tftpy | >= 0.7.2 | TFTP传输（备选方式） |
-
-### 6. 放置补丁文件
-
-将补丁文件放入 `patches/` 目录，文件名须与Excel中 `patch_file` 列一致：
-
-```
-patches/
-├── S9855_9825-CMW910-SYSTEM-R9131HS02.bin
-├── CE6800-V200R019SPH023.pat
-└── RGOS-2.0-patch1.pat
+```bash
+python -m switch_patcher --help
 ```
 
 ## 输入Excel格式
 
-参照 `h3c_hosts-9825-9131H02.xlsx` 的格式，Sheet中包含以下列：
+参照 `patch_hosts_template.xlsx` 的格式，Sheet中包含以下列：
 
 | 列名 | 说明 | 填写方 |
 |---|---|---|
@@ -166,7 +119,7 @@ patches/
 | `login_fail` | SSH登录失败（3次重试后仍失败） |
 | 空 | 未检查，需要执行步骤1 |
 
-**灰度分批**：在Excel中创建多个Sheet（如 `batch1`、`batch2`、`batch3`），每批放入部分设备行，执行时通过 `--sheet` 参数指定批次。
+**灰度分批**：在Excel中创建多个Sheet（如 `batch1`、`batch2`、`batch3`），每批放入部分设备行，执行时通过 `--sheet` 参数指定批次，或在 `patch_config.yaml` 中配置 `sheet` 字段。
 
 ## 厂商命令模板
 
@@ -224,6 +177,13 @@ rollback:
 
 save: save force
 error_patterns:
+  - "Error"
+  - "Unrecognized command"
+  - "Incomplete command"
+  - "Ambiguous command"
+  - "Wrong parameter"
+  - "Failed to"
+  - "No such file"
   - "cannot be activated again"   # 补丁已激活，不能重复激活
   - "not compliant"               # 补丁与设备不兼容
 md5_command: "md5sum flash:/{patch_file}"
@@ -236,6 +196,7 @@ verify_method: md5
 
 ```yaml
 vendor: Huawei
+recv_buffer_size: 409600
 
 # SCP/SFTP状态检查命令
 check_scp_commands:
@@ -275,7 +236,7 @@ rollback:
   - command: "delete flash:/{patch_file}"
 
 save: save
-# 华为不支持md5sum命令，通过dir查看文件大小间接验证
+# 华为不支持md5sum命令，通过dir查看文件大小间接验证完整性
 md5_command: "dir flash:/{patch_file}"
 verify_method: size
 ```
@@ -288,6 +249,7 @@ verify_method: size
 vendor: Ruijie
 # 锐捷设备连接前需等待1秒（限速保护）
 connect_delay: 1
+recv_buffer_size: 409600
 
 # SCP/SFTP状态检查命令
 check_scp_commands:
@@ -397,7 +359,8 @@ python -m switch_patcher --workers 10 --save --cpu-threshold 80
 ### 断点续跑
 
 重复执行时，工具自动基于Excel字段跳过已完成步骤：
-- `scp_status` 已有值（scp/sftp/scp_sftp）→ 跳过SCP检查和开启
+- `scp_status` 已有值（scp/sftp/scp_sftp） → 跳过SCP检查和开启
+- `scp_status=unreachable` 或 `login_fail` → 跳过该设备（下次重试时自动重新检查）
 - `upload_success=OK` → 跳过文件上传
 - `update_result=SUCCESS` → 跳过补丁激活
 
@@ -438,9 +401,10 @@ python -m switch_patcher [input] [options]
 工具自动按6步顺序编排执行，每步基于Excel字段自动过滤设备：
 
 ```
-步骤1: check_scp — 检查SCP/SFTP状态
-  │  登录设备执行check_scp_commands
-  │  检测输出中的scp server enable / sftp server enable关键字
+步骤1: check_scp — 检查设备SCP/SFTP状态
+  │  先TCP探测端口，不可达直接写 scp_status=unreachable
+  │  SSH登录执行check_scp_commands
+  │  检测输出中的 scp server enable / sftp server enable 关键字
   │  写入scp_status列: scp / sftp / scp_sftp / none / unreachable / login_fail
   │  已有scp_status的设备自动跳过
   ▼
@@ -480,7 +444,7 @@ python -m switch_patcher [input] [options]
 
 **关键设计**：
 - 每个阶段独立建立和断开SSH连接，避免长连接超时断开
-- 每个阶段完成后立即回写Excel，675台设备执行中可随时打开Excel查看进度
+- 每个阶段完成后立即回写Excel，数百台设备执行中可随时打开Excel查看进度
 - Excel回写使用线程锁（threading.Lock），保证并发安全
 
 ## 断点续跑
@@ -496,7 +460,6 @@ python -m switch_patcher [input] [options]
 | `upload_success=OK` | 跳过文件上传步骤 |
 | `upload_success=FAIL` | 重新上传补丁文件 |
 | `update_result=SUCCESS` | 跳过补丁激活步骤 |
-| `login_mode=FAIL` | 重新尝试3次SSH登录 |
 | `update_result=FAIL-xxx` | 重新执行完整流程 |
 
 典型操作流程：
@@ -514,69 +477,32 @@ python -m switch_patcher
 python -m switch_patcher
 ```
 
-## 输出文件
+## 配置文件说明
 
-执行完成后在Excel同目录下生成以下文件：
+`patch_config.yaml` 示例：
 
-```
-Excel同目录/
-├── logs/
-│   ├── BJ-YZ-DC-SROCE_AGG-03_01_01_01.BJ_20260526_143000.log
-│   ├── BJ-YZ-DC-SROCE_AGG-03_01_01_02.BJ_20260526_143000.log
-│   └── ...（每台设备一个日志文件）
-├── rollback/
-│   ├── BJ-YZ-DC-SROCE_AGG-03_01_01_01.BJ_20260526_143000.txt
-│   └── ...（每台设备一个回退命令文件）
-└── h3c_hosts.xlsx     （已回写所有状态列）
-```
+```yaml
+# 必填项
+excel: "h3c_hosts.xlsx"      # Excel文件路径（相对或绝对）
+sheet: "batch1"               # Sheet名称（灰度分批）
+username: "admin"             # SSH用户名
+password: "MyPassword123"     # SSH密码
 
-**设备日志文件** — 记录该设备从阶段0到阶段5的每一步操作和输出，用于审计和排障。
-
-**回退文件示例**：
-
-```
-# Rollback commands for: BJ-YZ-DC-SROCE_AGG-03_01_01_01.BJ (172.30.38.96)
-# Vendor: h3c
-# Generated: 2026-05-26 14:35:22
-# Patch file: S9855_9825-CMW910-SYSTEM-R9131HS02.bin
-# Run ID: 20260526_143000
-# WARNING: Review before executing. Apply in the order listed.
-
-install commit
-install deactivate patch flash:/S9855_9825-CMW910-SYSTEM-R9131HS02.bin
+# 可选项（以下为默认值）
+ssh_port: 22
+workers: 5
+timeout: 30
+patches_dir: patches
+save: false
+dry_run: false
+cpu_threshold: 90
+mem_threshold: 90
 ```
 
-> 回退命令按**反序排列**：最后执行的激活步骤对应的undo排在最前。只包含成功执行的步骤，失败步骤的undo不会出现。
+生成方式：
 
-## 控制台输出示例
-
-```
-=== Patch run 20260526_143000 started ===
-Total devices: 675, Workers: 5, Dry-run: False
-[1/675] BJ-YZ-DC-SROCE_AGG-03_01_01_01.BJ ... SUCCESS
-[2/675] BJ-YZ-DC-SROCE_AGG-03_01_01_02.BJ ... SUCCESS
-[3/675] BJ-YZ-DC-SROCE_AGG-03_01_01_03.BJ ... FAIL-LOGIN
-[4/675] BJ-YZ-DC-SROCE_AGG-03_01_01_04.BJ ... SKIP-CPU 92% > threshold 90%
-...
-=== Run 20260526_143000 complete ===
-  Success: 640  Partial: 2  Failed: 18  Skipped: 15
-  Failed login devices (18): BJ-YZ-DC-SROCE_AGG-..., ...
-
-======================================================================
-  Patch Summary - 2026-05-26 15:12:33
-======================================================================
-  Total: 675  |  Success: 640  |  Partial: 2  |  Failed: 18  |  Skipped: 15
-----------------------------------------------------------------------
-  [OK]       BJ-YZ-DC-SROCE_AGG-03_01_01_01.BJ   (172.30.38.96, h3c) - 2/2 commands applied
-  [PARTIAL]  BJ-YZ-DC-SROCE_AGG-03_01_01_05.BJ   (172.30.38.101, h3c) - 1/2 commands applied
-  [FAIL]     BJ-YZ-DC-SROCE_AGG-03_01_01_03.BJ   (172.30.38.98, h3c) - SSH login failed after 3 attempts
-  [SKIP]     BJ-YZ-DC-SROCE_AGG-03_01_01_04.BJ   (172.30.38.99, h3c) - CPU 92% > threshold 90%
-======================================================================
-
-  Failed login devices (re-run will retry these):
-    - BJ-YZ-DC-SROCE_AGG-03_01_01_03.BJ (172.30.38.98)
-    - BJ-YZ-DC-SROCE_AGG-03_01_01_06.BJ (172.30.38.102)
-    ...
+```bash
+python -m switch_patcher --gen-config
 ```
 
 ## 注意事项
