@@ -344,6 +344,14 @@ python -m switch_patcher --dry-run
 
 ### 指定Sheet灰度执行
 
+配置文件中已填好用户名密码时，直接指定Sheet即可：
+
+```bash
+python -m switch_patcher --sheet batch1
+```
+
+也可临时覆盖Excel路径或凭据：
+
 ```bash
 python -m switch_patcher h3c_hosts.xlsx --sheet batch1 --username admin --password xxx
 ```
