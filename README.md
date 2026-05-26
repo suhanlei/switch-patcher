@@ -72,14 +72,14 @@ Python 3.8+
 ### 2. 创建虚拟环境并安装依赖
 
 ```bash
-cd switch-patcher
-python -m venv venv
+# 创建虚拟环境（使用virtualenvwrapper）
+mkvirtualenv /home/virtual_path/switch-patcher
 
-# Windows
-venv\Scripts\activate
-# Linux/macOS
-source venv/bin/activate
+# 激活虚拟环境
+workon switch-patcher
 
+# 安装依赖
+cd /path/to/switch-patcher
 pip install -r requirements.txt
 ```
 
@@ -88,6 +88,36 @@ pip install -r requirements.txt
 ```bash
 python -m switch_patcher --help
 ```
+
+### 4. PyCharm 远程开发配置
+
+本地编辑代码，服务器上运行，PyCharm 做桥梁：
+
+**配置 Deployment（SFTP 同步）：**
+
+`Tools → Deployment → Configuration → + → SFTP`
+
+```
+SSH Host:       服务器IP
+Port:           22
+Username:       root
+
+Mappings 标签页：
+  Local Path:       本地项目目录
+  Deployment Path:  /switch-patcher
+```
+
+开启自动上传：`Tools → Deployment → Options → Upload changed files: Always`
+
+**配置远程解释器：**
+
+`File → Settings → Project → Python Interpreter → ⚙ → Add → SSH Interpreter`
+
+```
+Interpreter:  /home/virtual_path/switch-patcher/bin/python3
+```
+
+配置完成后，kscc 或 PyCharm 修改代码 → 自动同步到服务器 → PyCharm Run 在服务器上执行。
 
 ## 输入Excel格式
 

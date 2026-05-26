@@ -8,3 +8,5 @@ logs/
 *.log
 .env
 ~$*.xlsx
+packages/
+.idea/
