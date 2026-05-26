@@ -1,0 +1,19 @@
+# Switch Patcher 补丁执行配置文件
+# 执行命令：python -m switch_patcher（自动读取此文件）
+# CLI参数会覆盖此文件中的对应值
+
+# === 必填项 ===
+excel: ""                     # Excel文件路径（相对或绝对路径）
+sheet: ""                     # 要处理的Sheet名称（灰度分批）
+username: ""                  # SSH用户名（所有设备统一）
+password: ""                  # SSH密码（所有设备统一）
+
+# === 可选项 ===
+ssh_port: 22                  # SSH端口
+workers: 5                    # 最大并发设备连接数
+timeout: 30                   # 单条命令SSH超时秒数
+patches_dir: patches          # 补丁文件存放目录
+save: false                   # 激活后是否自动保存配置
+dry_run: false                # 预检查模式（只做健康检查，不传输不激活）
+cpu_threshold: 90             # CPU使用率跳过阈值（%）
+mem_threshold: 90             # 内存使用率跳过阈值（%）

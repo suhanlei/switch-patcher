@@ -5,14 +5,17 @@
 ## 功能特性
 
 - **多厂商支持** — H3C / 华为 / 锐捷，命令流程通过YAML模板定义，可直接编辑适配
+- **一条命令执行** — 编辑 `patch_config.yaml` 后，`python -m switch_patcher` 一键完成全流程
 - **Excel驱动** — 设备列表和执行进度都在同一个Excel中，工具实时回写状态列
 - **灰度补丁** — 支持选择Excel中的不同Sheet，分批次执行
+- **自动分步编排** — 自动执行：检查SCP→开启SCP→重新确认→上传补丁→激活补丁→后检查
+- **Excel字段驱动跳过** — 基于Excel中的 scp_status、upload_success、update_result 字段自动跳过已完成步骤，无需手动传参
 - **文件传输** — SFTP上传补丁文件，上传后MD5/文件大小校验确保完整性
 - **健康检查** — 打补丁前后检查CPU/内存/设备状态，超阈值自动跳过
 - **交互式命令** — 自动处理补丁激活时的Y/N确认提示（H3C install activate、华为 patch load）
 - **锐捷3步流程** — upgrade→active→running，每步等待进度100%完成
 - **H3C补丁检测** — 自动检测"已激活"和"不兼容"错误，避免重复操作
-- **SCP/SFTP使能** — 文件传输前自动启用设备端SCP/SFTP服务
+- **SCP/SFTP状态检查** — 先检查设备是否已开启SCP/SFTP，已开启的自动跳过
 - **登录重试** — TCP连通性前置检查 + SSH登录失败3次重试（间隔3秒）
 - **锐捷限速** — 连接锐捷设备前自动等待1秒，避免过快连接被拒绝
 - **H3C大缓冲** — H3C设备使用40MB接收缓冲区，适应display命令大量输出
@@ -20,7 +23,7 @@
 - **断点续跑** — 重复执行自动跳过已成功的设备，只重试失败的
 - **并发执行** — ThreadPoolExecutor设备间并发，进度实时显示
 - **回退文件** — 为每台设备生成反序undo命令文件，人工确认后手动执行
-- **默认不保存** — 补丁激活后默认不save，需`--save`显式开启
+- **默认不保存** — 补丁激活后默认不save，需在配置文件或CLI中显式开启
 - **中文注释** — 所有源码均含完整中文注释，便于二次开发
 
 ## 项目结构
@@ -30,14 +33,15 @@ switch-patcher/
 ├── switch_patcher/              # 主程序包
 │   ├── __init__.py               # 版本号
 │   ├── __main__.py               # python -m switch_patcher 入口
-│   ├── cli.py                    # 命令行参数定义
+│   ├── cli.py                    # 命令行参数定义（支持配置文件覆盖）
+│   ├── config.py                 # patch_config.yaml 加载与生成
 │   ├── excel_io.py               # Excel读写 + MD5计算 + 线程安全回写
 │   ├── vendor_profiles.py        # YAML厂商模板加载 + 占位符替换
 │   ├── connection.py             # netmiko SSH连接 + 重试逻辑
 │   ├── file_transfer.py          # SFTP上传 + TCP连通性检查 + 设备端文件校验
-│   ├── health_check.py           # CPU/内存/补丁版本正则解析 + 阈值判断
-│   ├── device_worker.py          # 单设备6阶段完整流程编排
-│   ├── batch_engine.py           # ThreadPoolExecutor并发调度 + 进度追踪
+│   ├── health_check.py           # CPU/内存/补丁版本正则解析 + SCP状态检查 + 阈值判断
+│   ├── device_worker.py          # 单设备各步骤函数（check_scp/enable_scp/upload/activate等）
+│   ├── batch_engine.py           # 6步编排调度 + ThreadPoolExecutor并发 + 进度追踪
 │   ├── reporting.py              # 执行汇总报告 + 失败设备清单
 │   └── logger.py                 # per-device日志文件 + 控制台输出
 ├── vendor_templates/             # 可编辑的YAML命令模板
@@ -45,6 +49,7 @@ switch-patcher/
 │   ├── huawei.yaml                # 华为VRP补丁命令流程
 │   └── ruijie.yaml               # 锐捷补丁命令流程
 ├── patches/                      # 补丁文件存放目录（使用前将补丁文件放入此处）
+├── patch_config.yaml             # 执行配置文件（Excel路径、Sheet、用户名密码等）
 ├── requirements.txt              # Python依赖清单
 └── .gitignore
 ```
@@ -145,11 +150,14 @@ patches/
 | patch_file | 补丁文件名 | 人工填写 |
 | patch1_md5_base | 本地补丁文件MD5 | **工具回写** |
 | patch1_md5_uploaded | 设备端文件MD5 | **工具回写** |
+| scp_status | SCP/SFTP服务状态（none/scp/sftp/scp_sftp） | **工具回写** |
 | login_mode | 登录状态（OK/FAIL/UNREACHABLE） | **工具回写** |
 | upload_success | 上传状态（OK/FAIL） | **工具回写** |
 | update_result | 升级结果（SUCCESS/PARTIAL/FAIL-xxx） | **工具回写** |
 
-人工只需填写前6列（Hostname ~ patch_file），后5列由工具在执行过程中逐步回写。
+人工只需填写前6列（Hostname ~ patch_file），后6列由工具在执行过程中逐步回写。
+
+`scp_status`列控制SCP/SFTP开启流程：工具先检查该字段，为空则登录设备检查；如果值为"none"则执行开启；已有"scp"/"sftp"/"scp_sftp"则自动跳过。
 
 **灰度分批**：在Excel中创建多个Sheet（如 `batch1`、`batch2`、`batch3`），每批放入部分设备行，执行时通过 `--sheet` 参数指定批次。
 
@@ -307,6 +315,19 @@ verify_method: md5
 
 所有命令需在虚拟环境中执行（提示符显示 `(venv)`）。
 
+### 快速开始
+
+```bash
+# 1. 生成示例配置文件
+python -m switch_patcher --gen-config
+
+# 2. 编辑配置文件，填入Excel路径、Sheet名、用户名密码
+#    vim patch_config.yaml
+
+# 3. 一条命令执行全流程
+python -m switch_patcher
+```
+
 ### 查看可用Sheet
 
 ```bash
@@ -326,133 +347,106 @@ Available sheets in h3c_hosts.xlsx:
 仅连接设备做健康检查和本地MD5计算，**不传输文件、不激活补丁**：
 
 ```bash
-python -m switch_patcher h3c_hosts.xlsx --username admin --password xxx --dry-run
+python -m switch_patcher --dry-run
 ```
 
 ### 指定Sheet灰度执行
 
 ```bash
-# 先执行batch1（如50台设备）
 python -m switch_patcher h3c_hosts.xlsx --sheet batch1 --username admin --password xxx
-
-# 确认无问题后执行batch2
-python -m switch_patcher h3c_hosts.xlsx --sheet batch2 --username admin --password xxx
 ```
 
-### 完整执行
+### 覆盖配置文件参数
+
+CLI参数优先级高于配置文件：
 
 ```bash
-python -m switch_patcher h3c_hosts.xlsx --username admin --password xxx --workers 10
+python -m switch_patcher --workers 10 --save --cpu-threshold 80
 ```
 
-### 跳过已上传设备的文件传输
+### 断点续跑
 
-第一次执行后文件已上传成功，第二次只重试激活阶段：
+重复执行时，工具自动基于Excel字段跳过已完成步骤：
+- `scp_status` 已有值（scp/sftp/scp_sftp）→ 跳过SCP检查和开启
+- `upload_success=OK` → 跳过文件上传
+- `update_result=SUCCESS` → 跳过补丁激活
 
-```bash
-python -m switch_patcher h3c_hosts.xlsx --username admin --password xxx --skip-uploaded
-```
-
-### 激活后自动保存配置
-
-默认不save，确认补丁无问题后再手动保存。加 `--save` 自动保存：
-
-```bash
-python -m switch_patcher h3c_hosts.xlsx --username admin --password xxx --save
-```
-
-### 调整健康检查阈值
-
-CPU或内存超过80%就跳过该设备：
-
-```bash
-python -m switch_patcher h3c_hosts.xlsx --username admin --password xxx --cpu-threshold 80 --mem-threshold 80
-```
+无需手动传 `--skip-uploaded`，工具自动判断。
 
 ## 全部参数
 
 ```
-python -m switch_patcher <input.xlsx> [options]
+python -m switch_patcher [input] [options]
 
 位置参数:
-  input                       输入Excel文件路径
+  input                       输入Excel文件路径（也可在patch_config.yaml中配置）
 
-灰度与预检:
-  --sheet SHEET               指定要处理的Excel Sheet名称（灰度分批）
-  --list-sheets               列出Excel中所有可用Sheet后退出
+常用选项:
+  --sheet SHEET               指定Excel Sheet名称（灰度分批），覆盖配置文件
+  --username USER             SSH用户名，覆盖配置文件
+  --password PASS             SSH密码，覆盖配置文件
   --dry-run                   仅预检查，不传输文件、不激活补丁
+  --list-sheets               列出Excel中所有可用Sheet后退出
+  --gen-config                生成示例配置文件 patch_config.yaml
 
 执行控制:
   --workers N                 最大并发设备连接数（默认: 5）
-  --timeout N                 单条命令SSH超时秒数（默认: 30）
+  --timeout N                 SSH超时秒数（默认: 30）
   --save                      激活后自动保存配置（默认: 不保存）
-  --skip-uploaded             跳过upload_success=OK的设备
+  --ssh-port PORT             SSH端口（默认: 22）
+  --patches-dir DIR           补丁文件存放目录（默认: patches）
 
 健康检查:
   --cpu-threshold %           CPU使用率跳过阈值（默认: 90）
   --mem-threshold %           内存使用率跳过阈值（默认: 90）
 
-文件传输:
-  --transfer sftp|tftp        文件传输方式（默认: sftp）
-  --patches-dir DIR           补丁文件存放目录（默认: patches）
-  --enable-scp / --no-enable-scp  传输前自动启用SCP/SFTP（默认: 启用）
-
-SSH认证:
-  --username USER             SSH用户名（所有设备统一）
-  --password PASS             SSH密码（所有设备统一）
-  --ssh-port PORT             SSH端口（默认: 22）
+参数优先级: CLI参数 > patch_config.yaml > 默认值
 ```
 
 ## 执行流程
 
-单设备完整流程分为6个阶段：
+工具自动按6步顺序编排执行，每步基于Excel字段自动过滤设备：
 
 ```
-阶段0: 本地校验
-  │  检查补丁文件是否存在于 patches/ 目录
-  │  计算本地文件MD5 → 回写 patch1_md5_base
-  │  文件不存在则标记 FAIL-NOFILE 并跳过
+步骤1: check_scp — 检查SCP/SFTP状态
+  │  登录设备执行check_scp_commands
+  │  检测输出中的scp server enable / sftp server enable关键字
+  │  写入scp_status列: scp / sftp / scp_sftp / none
+  │  已有scp_status的设备自动跳过
   ▼
-阶段1: 连通性检查 + 预检查
-  │  TCP端口探测（22端口可达性）
-  │  SSH登录（3次重试，每次间隔3秒）
-  │  登录成功 → 回写 login_mode=OK
-  │  登录失败 → 回写 login_mode=FAIL, update_result=FAIL-LOGIN
-  │  执行 display patch / cpu / memory / device
-  │  提取当前补丁版本 → 回写 patch_now
-  │  写入目标补丁版本 → 回写 patch_new
-  │  CPU/内存超过阈值 → 标记 SKIP 并跳过
+步骤2: open_scp — 开启SCP/SFTP服务
+  │  只对scp_status=none的设备执行
+  │  执行scp_enable_commands（进入系统视图→开启SCP→开启SFTP）
+  │  执行后保存配置（处理Y/N交互）
   ▼
-阶段2: 文件传输
-  │  若 upload_success=OK 则跳过（支持 --skip-uploaded）
-  │  自动启用SCP/SFTP服务（如未启用，可通过 --no-enable-scp 跳过）
-  │  SFTP上传补丁文件到 flash:/
-  │  上传失败 → 回写 upload_success=FAIL, update_result=FAIL-UPLOAD
-  │  重连设备执行 md5sum/dir 校验文件完整性
-  │  校验通过 → 回写 upload_success=OK, patch1_md5_uploaded
-  │  校验不匹配 → 回写 upload_success=FAIL-MD5, 不进入激活阶段
+步骤3: recheck_scp — 再次确认已开启
+  │  对步骤2后仍为none的设备重新检查
+  │  更新scp_status列
   ▼
-阶段3: 激活补丁（--dry-run 到此结束）
-  │  进入config模式（netmiko自动处理厂商差异）
-  │  逐条执行activate命令：
-  │    - 交互式命令（H3C install activate、华为 patch load）自动回复Y/N确认
-  │    - 锐捷3步流程（upgrade→active→running）每步等待进度100%完成
-  │    - 所有while循环有死循环保护（最多60次迭代）
-  │  每条命令检查error_patterns（包括H3C的"已激活"和"不兼容"错误）
-  │  命令失败则记录但继续下一条（尽力而为）
-  │  默认不save（需 --save 才保存）
+步骤4: upload — 上传补丁文件
+  │  只对upload_success≠OK且scp_status≠none的设备执行
+  │  本地文件校验 → TCP连通性检查 → SFTP上传 → 设备端MD5/大小校验
+  │  校验通过 → 写upload_success=OK
+  │  校验失败 → 写upload_success=FAIL，不进入激活
   ▼
-阶段4: 后检查
-  │  重新SSH连接
-  │  执行 display patch / cpu / memory
-  │  对比补丁前后CPU/内存变化
-  │  验证补丁版本已更新 → patch_applied=True/False
+步骤5: activate — 激活补丁（--dry-run到此结束）
+  │  只对upload_success=OK且update_result≠SUCCESS的设备执行
+  │  预检查：健康检查 + 阈值判断
+  │  进入config模式，逐条执行activate命令
+  │  交互式命令自动回复Y/N，锐捷3步等待进度100%
+  │  每条检查error_patterns（含H3C"已激活"/"不兼容"）
+  │  默认不save
   ▼
-阶段5: 生成回退文件
-     写入 rollback/{hostname}_{run_id}.txt
-     只包含成功执行步骤的反序undo命令
-     文件头含设备信息、时间戳、补丁编号、操作警告
+步骤6: post_check + rollback — 后检查与生成回退
+  │  重新SSH连接执行post_check命令
+  │  验证补丁版本已更新
+  │  为成功激活的步骤生成反序undo命令文件
+  ▼
+汇总: 打印成功/失败/跳过统计 + 登录失败设备清单
 ```
+
+**断点续跑**：重复执行时，每步开始前重新读取Excel，自动跳过已完成的设备。例如：
+- 第一轮执行到上传阶段因网络中断 → 第二轮自动跳过SCP检查和开启，只重新上传和激活
 
 **关键设计**：
 - 每个阶段独立建立和断开SSH连接，避免长连接超时断开
@@ -461,28 +455,31 @@ SSH认证:
 
 ## 断点续跑
 
-工具天然支持断点续跑，基于Excel中的状态列判断：
+工具天然支持断点续跑，基于Excel中的状态字段自动判断：
 
-| 上次状态 | 本次行为 |
+| Excel字段状态 | 工具行为 |
 |---|---|
-| `update_result=SUCCESS` | 自动跳过，不重复执行 |
-| `upload_success=OK` + `--skip-uploaded` | 跳过文件传输，直接进入激活阶段 |
+| `scp_status` 已有值（scp/sftp/scp_sftp） | 跳过SCP检查和开启步骤 |
+| `scp_status=none` | 执行SCP/SFTP开启命令 |
+| `upload_success=OK` | 跳过文件上传步骤 |
+| `upload_success=FAIL` | 重新上传补丁文件 |
+| `update_result=SUCCESS` | 跳过补丁激活步骤 |
 | `login_mode=FAIL` | 重新尝试3次SSH登录 |
-| `update_result=FAIL-xxx` | 从头重新执行完整流程 |
+| `update_result=FAIL-xxx` | 重新执行完整流程 |
 
 典型操作流程：
 
 ```bash
 # 第一轮：全量执行
-python -m switch_patcher h3c_hosts.xlsx --username admin --password xxx
+python -m switch_patcher
 
 # 检查结果，发现30台登录失败、5台上传失败
-# 第二轮：只重试失败的（已成功的自动跳过）
-python -m switch_patcher h3c_hosts.xlsx --username admin --password xxx --skip-uploaded
+# 第二轮：只重试失败的（已完成的自动跳过）
+python -m switch_patcher
 
 # 检查结果，剩余5台仍然登录失败（可能设备离线）
 # 第三轮：继续重试
-python -m switch_patcher h3c_hosts.xlsx --username admin --password xxx --skip-uploaded
+python -m switch_patcher
 ```
 
 ## 输出文件
@@ -552,15 +549,15 @@ Total devices: 675, Workers: 5, Dry-run: False
 
 ## 注意事项
 
-1. **补丁文件放置** — 将所有补丁文件放入 `patches/` 目录，文件名须与Excel中的 `patch_file` 列完全一致
-2. **SFTP前提** — H3C设备需提前启用SFTP服务：`sftp server enable`；华为设备默认支持；工具可通过 `--enable-scp` 自动启用（默认开启）
-3. **文件校验方式** — H3C使用 `md5sum` 命令精确校验MD5；华为通过 `dir` 查看文件大小间接验证（设备不支持MD5命令）；锐捷使用 `verify` 命令校验
+1. **配置文件** — 首次使用先执行 `python -m switch_patcher --gen-config`，编辑 `patch_config.yaml` 填入Excel路径、Sheet名和SSH凭据
+2. **SCP/SFTP状态** — 工具自动检查并开启，已开启的设备跳过；状态记录在Excel `scp_status` 列，重复执行不会重复开启
+3. **文件校验方式** — H3C使用 `md5sum` 命令精确校验MD5；华为通过 `dir` 查看文件大小间接验证；锐捷使用 `verify` 命令校验
 4. **交互式命令** — H3C的 `install activate` 和华为的 `patch load` 会提示Y/N确认，工具自动回复Y；锐捷3步流程每步等待进度100%完成
 5. **H3C大缓冲区** — H3C设备使用40MB接收缓冲区，适应display命令大量输出
 6. **锐捷限速** — 连接锐捷设备前自动等待1秒，避免过快连接被设备拒绝
 7. **死循环保护** — 所有while循环最多60次迭代后强制退出，防止设备输出异常导致无限等待
-8. **保存配置** — 默认不save，给人工验证留窗口期。确认补丁生效后手动save或加 `--save` 重新执行
+8. **保存配置** — 默认不save，给人工验证留窗口期。可在配置文件设置 `save: true` 或用 `--save` 覆盖
 9. **回退操作** — 工具只生成回退命令文件，不自动执行。需人工审核后登录设备手动执行
-10. **并发控制** — `--workers` 控制并发数，建议生产环境不超过10，避免对设备管理口造成压力
-11. **密码安全** — 密码通过命令行参数传递，建议执行后清理Shell历史记录
+10. **并发控制** — `workers` 控制并发数，建议生产环境不超过10，避免对设备管理口造成压力
+11. **密码安全** — 密码可存于配置文件（建议设置文件权限600），也可通过CLI参数传递（执行后清理Shell历史）
 12. **二次开发** — 所有源码均有完整中文注释，YAML模板可直接编辑，方便适配其他厂商或自定义流程

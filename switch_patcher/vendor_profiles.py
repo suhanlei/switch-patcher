@@ -62,6 +62,13 @@ class ScpEnableCommand:
 
 
 @dataclass
+class ScpCheckCommand:
+    """SCP/SFTP状态检查命令，用于确认设备是否已开启相关服务"""
+    command: str
+    key: str
+
+
+@dataclass
 class VendorProfile:
     """
     厂商配置档案，包含该厂商补丁操作所需的全部命令和信息
@@ -80,6 +87,7 @@ class VendorProfile:
     post_check: list[CheckCommand] = field(default_factory=list)       # 补丁后健康检查命令列表
     rollback: list[ActivateCommand] = field(default_factory=list)      # 回退命令列表
     scp_enable_commands: list[ScpEnableCommand] = field(default_factory=list)  # SCP/SFTP使能命令列表
+    check_scp_commands: list[ScpCheckCommand] = field(default_factory=list)    # SCP/SFTP状态检查命令列表
     save: str = ""                           # 保存配置的命令
     patch_id_pattern: str = ""               # 从输出中提取补丁版本号的正则表达式
     error_patterns: list[str] = field(default_factory=list)  # 命令执行错误的匹配模式列表
@@ -115,6 +123,13 @@ def _parse_scp_enable_list(items: list[dict] | None) -> list[ScpEnableCommand]:
     return [ScpEnableCommand(command=i["command"], description=i.get("description", "")) for i in items]
 
 
+def _parse_scp_check_list(items: list[dict] | None) -> list[ScpCheckCommand]:
+    """将YAML中的SCP检查命令字典列表转换为ScpCheckCommand对象列表"""
+    if not items:
+        return []
+    return [ScpCheckCommand(command=i["command"], key=i["key"]) for i in items]
+
+
 def load_profile(vendor: str, templates_dir: Path | None = None) -> VendorProfile:
     """
     根据厂商名称加载对应的YAML命令模板
@@ -145,6 +160,7 @@ def load_profile(vendor: str, templates_dir: Path | None = None) -> VendorProfil
         post_check=_parse_check_list(data.get("post_check", [])),
         rollback=_parse_activate_list(data.get("rollback", [])),
         scp_enable_commands=_parse_scp_enable_list(data.get("scp_enable_commands")),
+        check_scp_commands=_parse_scp_check_list(data.get("check_scp_commands")),
         save=data.get("save", ""),
         patch_id_pattern=data.get("patch_id_pattern", ""),
         error_patterns=data.get("error_patterns", []),

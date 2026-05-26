@@ -4,7 +4,14 @@ remote_dir: "flash:/"
 # 华为设备默认接收缓冲区大小
 recv_buffer_size: 409600
 
-# SCP/SFTP前置使能命令（补丁文件传输前需确保设备已启用SCP/SFTP服务）
+# SCP/SFTP状态检查命令（先确认设备是否已开启，再决定是否需要执行使能）
+check_scp_commands:
+  - command: "display cur | in scp"
+    key: scp
+  - command: "display cur | in sftp"
+    key: sftp
+
+# SCP/SFTP前置使能命令（仅对scp_status=none的设备执行）
 scp_enable_commands:
   - command: system-view
     description: 进入系统视图

@@ -5,6 +5,7 @@
 - 阈值判断：CPU或内存超过设定值则建议跳过
 - 补丁版本提取：从display patch information中提取当前补丁名
 - H3C特有错误模式检测：补丁已激活、补丁不兼容
+- SCP/SFTP状态检查：确认设备是否已开启文件传输服务
 """
 
 import re
@@ -13,7 +14,7 @@ from dataclasses import dataclass
 
 from netmiko import ConnectHandler
 
-from switch_patcher.vendor_profiles import VendorProfile, format_command
+from switch_patcher.vendor_profiles import VendorProfile, format_command, ScpCheckCommand
 
 logger = logging.getLogger(__name__)
 
@@ -164,3 +165,51 @@ def verify_patch_applied(
     except Exception as e:
         logger.warning(f"Patch verification failed: {e}")
         return False
+
+
+def check_scp_sftp(
+    conn: ConnectHandler,
+    profile: VendorProfile,
+) -> str:
+    """
+    检查设备SCP/SFTP服务状态
+    - 执行YAML模板中check_scp_commands定义的命令
+    - 从输出中检测是否包含SCP/SFTP使能关键字
+    - 返回: 'scp' / 'sftp' / 'scp_sftp' / 'none'
+    - 参考ksnetwork check_scp.py的逻辑
+    """
+    has_scp = False
+    has_sftp = False
+
+    for cmd in profile.check_scp_commands:
+        try:
+            output = conn.send_command(cmd.command, read_timeout=15)
+
+            # 检测SCP使能关键字
+            if cmd.key == "scp":
+                if re.search(r"scp\s+\S*\s*\S*\s*enable", output, re.IGNORECASE):
+                    has_scp = True
+                # H3C/华为精简匹配
+                elif re.search(r"scp server enable", output, re.IGNORECASE):
+                    has_scp = True
+                # 锐捷匹配
+                elif re.search(r"ip scp server enable", output, re.IGNORECASE):
+                    has_scp = True
+
+            # 检测SFTP使能关键字
+            elif cmd.key == "sftp":
+                if re.search(r"sftp\s+\S*\s*\S*\s*enable", output, re.IGNORECASE):
+                    has_sftp = True
+                elif re.search(r"sftp server enable", output, re.IGNORECASE):
+                    has_sftp = True
+
+        except Exception as e:
+            logger.warning(f"SCP check command '{cmd.key}' failed: {e}")
+
+    if has_scp and has_sftp:
+        return "scp_sftp"
+    elif has_scp:
+        return "scp"
+    elif has_sftp:
+        return "sftp"
+    return "none"

@@ -1,14 +1,17 @@
 """
 命令行接口模块
-- 定义所有CLI参数（灰度Sheet选择、并发数、阈值等）
-- 主流程串联：读取Excel → 批量执行 → 打印报告
+- 支持从patch_config.yaml读取配置（Sheet、用户名密码等）
+- CLI参数可覆盖配置文件值
+- 简化执行：python -m switch_patcher 即可一键执行
 - 支持--list-sheets查看可用Sheet
 - 支持--dry-run预检查模式
+- 支持--gen-config生成示例配置文件
 """
 
 import argparse
 import sys
 
+from switch_patcher.config import load_config, gen_config
 from switch_patcher.excel_io import read_devices, list_sheets
 from switch_patcher.batch_engine import run_batch
 from switch_patcher.reporting import print_report
@@ -18,85 +21,103 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """定义并解析命令行参数"""
     parser = argparse.ArgumentParser(
         prog="switch_patcher",
-        description="Network switch configuration patch tool - batch apply patches with health checks and rollback generation",
+        description="批量交换机补丁工具 - 一条命令完成补丁检查、传输、激活全流程",
     )
-    # 位置参数：Excel文件路径
-    parser.add_argument("input", help="Path to input Excel file")
+    # Excel文件路径（可选，配置文件中也有）
+    parser.add_argument("input", nargs="?", default=None, help="输入Excel文件路径（也可在配置文件中指定）")
     # 灰度补丁：指定Sheet名称
-    parser.add_argument("--sheet", help="Excel sheet name to process (supports grayscale patching). Use --list-sheets to see available sheets.")
+    parser.add_argument("--sheet", help="指定Excel Sheet名称（灰度分批），覆盖配置文件值")
     # 查看可用Sheet
-    parser.add_argument("--list-sheets", action="store_true", help="List available sheets in the Excel file and exit")
+    parser.add_argument("--list-sheets", action="store_true", help="列出Excel中所有可用Sheet后退出")
     # 预检查模式
-    parser.add_argument("--dry-run", action="store_true", help="Connect and pre-check only, do not transfer or activate")
-    # 并发数
-    parser.add_argument("--workers", type=int, default=5, help="Max concurrent device connections (default: 5)")
-    # SSH超时
-    parser.add_argument("--timeout", type=int, default=30, help="Per-command SSH timeout in seconds (default: 30)")
-    # 保存配置（默认不保存）
-    parser.add_argument("--save", action="store_true", help="Save config after applying (default: do not save)")
-    # CPU阈值
-    parser.add_argument("--cpu-threshold", type=float, default=90.0, help="Skip device if CPU exceeds this %% (default: 90)")
-    # 内存阈值
-    parser.add_argument("--mem-threshold", type=float, default=90.0, help="Skip device if memory exceeds this %% (default: 90)")
-    # 文件传输方式
-    parser.add_argument("--transfer", choices=["sftp", "tftp"], default="sftp", help="File transfer method (default: sftp)")
-    # SSH认证信息
-    parser.add_argument("--username", help="SSH username (unified for all devices)")
-    parser.add_argument("--password", help="SSH password (unified for all devices)")
-    parser.add_argument("--ssh-port", type=int, default=22, help="SSH port (default: 22)")
-    # 补丁文件目录
-    parser.add_argument("--patches-dir", default="patches", help="Directory containing patch files (default: patches)")
-    # 跳过已上传成功的设备
-    parser.add_argument("--skip-uploaded", action="store_true", help="Skip devices where upload_success=OK")
-    # SCP/SFTP使能（文件传输前自动启用）
-    parser.add_argument("--enable-scp", action="store_true", default=True, help="Auto-enable SCP/SFTP before transfer (default: True)")
-    parser.add_argument("--no-enable-scp", action="store_false", dest="enable_scp", help="Skip SCP/SFTP enable step")
+    parser.add_argument("--dry-run", action="store_true", help="仅预检查，不传输文件、不激活补丁")
+    # 生成示例配置文件
+    parser.add_argument("--gen-config", action="store_true", help="生成示例配置文件 patch_config.yaml")
+    # SSH认证信息（覆盖配置文件）
+    parser.add_argument("--username", help="SSH用户名（覆盖配置文件值）")
+    parser.add_argument("--password", help="SSH密码（覆盖配置文件值）")
+    # 执行控制（覆盖配置文件）
+    parser.add_argument("--workers", type=int, default=None, help="最大并发设备连接数（默认: 5）")
+    parser.add_argument("--timeout", type=int, default=None, help="SSH超时秒数（默认: 30）")
+    parser.add_argument("--save", action="store_true", default=None, help="激活后自动保存配置（默认: 不保存）")
+    parser.add_argument("--ssh-port", type=int, default=None, help="SSH端口（默认: 22）")
+    parser.add_argument("--patches-dir", default=None, help="补丁文件目录（默认: patches）")
+    parser.add_argument("--cpu-threshold", type=float, default=None, help="CPU跳过阈值%%（默认: 90）")
+    parser.add_argument("--mem-threshold", type=float, default=None, help="内存跳过阈值%%（默认: 90）")
     return parser.parse_args(argv)
+
+
+def _merge_config(args: argparse.Namespace, cfg: dict) -> dict:
+    """合并CLI参数与配置文件，CLI参数优先"""
+    merged = {
+        "excel_path": args.input or cfg.get("excel", ""),
+        "sheet": args.sheet or cfg.get("sheet"),
+        "username": args.username or cfg.get("username", ""),
+        "password": args.password or cfg.get("password", ""),
+        "ssh_port": args.ssh_port or cfg.get("ssh_port", 22),
+        "workers": args.workers or cfg.get("workers", 5),
+        "timeout": args.timeout or cfg.get("timeout", 30),
+        "patches_dir": args.patches_dir or cfg.get("patches_dir", "patches"),
+        "save": args.save if args.save is not None else cfg.get("save", False),
+        "dry_run": args.dry_run or cfg.get("dry_run", False),
+        "cpu_threshold": args.cpu_threshold or cfg.get("cpu_threshold", 90.0),
+        "mem_threshold": args.mem_threshold or cfg.get("mem_threshold", 90.0),
+    }
+    return merged
 
 
 def main(argv: list[str] | None = None) -> int:
     """主入口函数"""
     args = parse_args(argv)
 
+    # 生成配置文件模式
+    if args.gen_config:
+        msg = gen_config()
+        print(msg)
+        return 0
+
+    # 加载配置文件
+    cfg = load_config()
+    c = _merge_config(args, cfg)
+
+    # 校验必填参数
+    if not c["excel_path"]:
+        print("ERROR: 请指定Excel文件路径（命令行参数或在patch_config.yaml中配置excel字段）", file=sys.stderr)
+        return 1
+    if not c["username"] or not c["password"]:
+        print("ERROR: 请提供SSH用户名和密码（命令行--username/--password或在patch_config.yaml中配置）", file=sys.stderr)
+        return 1
+
     # 列出Sheet模式
     if args.list_sheets:
-        sheets = list_sheets(args.input)
-        print(f"Available sheets in {args.input}:")
+        sheets = list_sheets(c["excel_path"])
+        print(f"Available sheets in {c['excel_path']}:")
         for s in sheets:
             print(f"  - {s}")
         return 0
 
-    # 校验必填参数
-    if not args.username or not args.password:
-        print("ERROR: --username and --password are required", file=sys.stderr)
-        return 1
-
     # 从指定Sheet读取设备列表
-    devices = read_devices(args.input, sheet_name=args.sheet)
+    devices = read_devices(c["excel_path"], sheet_name=c["sheet"])
     if not devices:
         print("No devices found in the Excel file", file=sys.stderr)
         return 1
 
-    print(f"Loaded {len(devices)} devices from '{args.sheet or 'default'}' sheet")
+    print(f"Loaded {len(devices)} devices from '{c['sheet'] or 'default'}' sheet")
 
-    # 执行批量补丁
+    # 执行批量补丁（分步编排：check_scp→open_scp→recheck→upload→activate→finalize）
     results = run_batch(
-        devices=devices,
-        excel_path=args.input,
-        patches_dir=args.patches_dir,
-        username=args.username,
-        password=args.password,
-        ssh_port=args.ssh_port,
-        timeout=args.timeout,
-        dry_run=args.dry_run,
-        save_after_apply=args.save,
-        cpu_threshold=args.cpu_threshold,
-        mem_threshold=args.mem_threshold,
-        max_workers=args.workers,
-        skip_uploaded=args.skip_uploaded,
-        enable_scp=args.enable_scp,
+        excel_path=c["excel_path"],
+        sheet_name=c["sheet"],
+        username=c["username"],
+        password=c["password"],
+        ssh_port=c["ssh_port"],
+        timeout=c["timeout"],
+        dry_run=c["dry_run"],
+        save_after_apply=c["save"],
+        cpu_threshold=c["cpu_threshold"],
+        mem_threshold=c["mem_threshold"],
+        max_workers=c["workers"],
+        patches_dir=c["patches_dir"],
     )
 
-    # 打印汇总报告
-    print_report(results)
     return 0

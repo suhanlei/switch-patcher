@@ -1,9 +1,14 @@
 """
-批量执行引擎模块
-- 使用ThreadPoolExecutor实现设备间并发
-- 线程安全的进度计数器（threading.Lock保护）
-- 失败登录设备单独汇总，方便二次重试
-- 支持--skip-uploaded跳过已上传设备的文件传输阶段
+批量执行引擎模块 — 分步编排
+- 参考ksnetwork的patch_run_all流程，自动分6步执行
+- 每步读取Excel获取最新设备状态，基于字段值自动过滤需要执行的设备
+- ThreadPoolExecutor实现设备间并发，threading.Lock保护Excel回写
+- 步骤1: check_scp   — 检查SCP/SFTP状态 → 写scp_status列
+- 步骤2: open_scp    — 只对scp_status=none的设备开启SCP/SFTP
+- 步骤3: recheck_scp — 再次检查确认已开启 → 更新scp_status列
+- 步骤4: upload      — 只对upload_success≠OK的设备上传补丁
+- 步骤5: activate    — 只对upload_success=OK且update_result≠SUCCESS的设备激活补丁
+- 步骤6: finalize    — 后检查 + 生成回退文件 + 打印汇总报告
 """
 
 import logging
@@ -12,18 +17,18 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-from switch_patcher.excel_io import DeviceResult, list_sheets
+from switch_patcher.excel_io import DeviceResult, read_devices, list_sheets
 from switch_patcher.vendor_profiles import load_profile
-from switch_patcher.device_worker import execute_device
+from switch_patcher.device_worker import step_check_scp, step_enable_scp, step_upload, step_activate
+from switch_patcher.reporting import print_report
 from switch_patcher.logger import setup_console_logger, get_device_logger
 
 logger = logging.getLogger("switch_patcher")
 
 
 def run_batch(
-    devices: list,
     excel_path: str,
-    patches_dir: str,
+    sheet_name: str | None = None,
     username: str = "",
     password: str = "",
     ssh_port: int = 22,
@@ -33,108 +38,165 @@ def run_batch(
     cpu_threshold: float = 90.0,
     mem_threshold: float = 90.0,
     max_workers: int = 5,
-    skip_uploaded: bool = False,
-    enable_scp: bool = True,
+    patches_dir: str = "patches",
 ) -> list[DeviceResult]:
     """
-    批量执行补丁流程
-    - devices: 设备信息列表
-    - max_workers: 最大并发线程数
-    - skip_uploaded: 跳过已上传文件成功的设备
-    - enable_scp: 在文件传输前自动启用SCP/SFTP服务
-    - 返回: 所有设备的执行结果列表
+    分步编排执行批量补丁流程
+    - 每步重新读取Excel，获取最新设备状态
+    - 基于Excel字段值自动过滤设备，无需手动传skip参数
+    - 返回: 所有设备的最终执行结果
     """
-    # 生成批次ID，用于日志文件和回退文件命名
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     logs_dir = str(Path(excel_path).parent / "logs")
 
     setup_console_logger()
     logger.info(f"=== Patch run {run_id} started ===")
-    logger.info(f"Total devices: {len(devices)}, Workers: {max_workers}, Dry-run: {dry_run}")
 
-    results: list[DeviceResult] = []
-    failed_logins: list[str] = []       # 登录失败的设备名列表
-    progress_lock = threading.Lock()     # 进度计数器锁
-    completed_count = 0
-    total = len(devices)
+    all_results: list[DeviceResult] = []
+    progress_lock = threading.Lock()
 
-    def _worker(device):
-        """单个设备的工作线程函数"""
-        nonlocal completed_count
-        # 为每台设备创建独立的日志文件
-        device_logger = get_device_logger(device.hostname, run_id, logs_dir)
+    def _run_step(step_name: str, devices: list, step_func, step_kwargs: dict):
+        """执行单个步骤，多线程并发"""
+        if not devices:
+            logger.info(f"Step [{step_name}]: No devices to process, skipping")
+            return []
 
-        # 加载对应厂商的命令模板
-        try:
-            profile = load_profile(device.vendor)
-        except FileNotFoundError as e:
-            device_logger.error(f"Vendor profile not found: {e}")
-            result = DeviceResult(
-                hostname=device.hostname,
-                mgmt_ip=device.mgmt_ip,
-                vendor=device.vendor,
-                status="failed",
-                error_message=str(e),
-            )
+        logger.info(f"Step [{step_name}]: Processing {len(devices)} devices (workers={max_workers})")
+        step_results = []
+        completed_count = 0
+        total = len(devices)
+
+        def _worker(device):
+            nonlocal completed_count
+            device_logger = get_device_logger(device.hostname, run_id, logs_dir)
+            try:
+                profile = load_profile(device.vendor)
+            except FileNotFoundError as e:
+                device_logger.error(f"Vendor profile not found: {e}")
+                result = DeviceResult(
+                    hostname=device.hostname,
+                    mgmt_ip=device.mgmt_ip,
+                    vendor=device.vendor,
+                    status="failed",
+                    error_message=str(e),
+                )
+                with progress_lock:
+                    completed_count += 1
+                    step_results.append(result)
+                    logger.info(f"[{completed_count}/{total}] {device.hostname} ... FAIL")
+                return result
+
+            # 注入公共参数
+            kwargs = {**step_kwargs, "username": username, "password": password,
+                      "ssh_port": ssh_port, "timeout": timeout}
+            result = step_func(device, profile, **kwargs)
+
+            # step_activate 返回 DeviceResult，其他步骤返回简单值
             with progress_lock:
                 completed_count += 1
-                results.append(result)
+                if isinstance(result, DeviceResult):
+                    step_results.append(result)
+                    status_str = result.status.upper()
+                else:
+                    status_str = "OK" if result else "FAIL"
+                logger.info(f"[{completed_count}/{total}] {device.hostname} ... {status_str}")
+
             return result
 
-        # 执行单设备完整流程
-        result = execute_device(
-            device=device,
-            profile=profile,
-            excel_path=excel_path,
-            patches_dir=patches_dir,
-            run_id=run_id,
-            username=username,
-            password=password,
-            ssh_port=ssh_port,
-            timeout=timeout,
-            dry_run=dry_run,
-            save_after_apply=save_after_apply,
-            cpu_threshold=cpu_threshold,
-            mem_threshold=mem_threshold,
-            enable_scp=enable_scp,
-        )
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_worker, d): d for d in devices}
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.error(f"Worker exception: {e}")
 
-        with progress_lock:
-            completed_count += 1
-            results.append(result)
-            # 登录失败的设备加入失败列表，方便后续重试
-            if result.status == "failed" and "LOGIN" in result.error_message:
-                failed_logins.append(device.hostname)
-            # 实时打印进度
-            logger.info(f"[{completed_count}/{total}] {device.hostname} ... {result.status.upper()}")
+        return step_results
 
-        return result
+    # ========== 步骤1: 检查SCP/SFTP状态 ==========
+    devices = read_devices(excel_path, sheet_name)
+    logger.info(f"Loaded {len(devices)} devices from '{sheet_name or 'default'}' sheet")
 
-    # 跳过已上传文件成功的设备（配合--skip-uploaded参数）
-    if skip_uploaded:
-        before = len(devices)
-        devices = [d for d in devices if d.upload_success != "OK"]
-        after = len(devices)
-        if before != after:
-            logger.info(f"Skipped {before - after} already-uploaded devices")
+    # 只对scp_status为空的设备检查（已检查过的跳过）
+    need_check = [d for d in devices if not d.scp_status]
+    # 临时保存excel_path到device对象（step函数需要）
+    for d in need_check:
+        d.excel_path = excel_path
 
-    # 提交所有设备到线程池并发执行
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_worker, d): d for d in devices}
-        for future in as_completed(futures):
-            future.result()  # 等待所有任务完成，抛出未捕获异常
+    _run_step("check_scp", need_check, step_check_scp, {})
+
+    # ========== 步骤2: 开启SCP/SFTP（仅scp_status=none的设备） ==========
+    devices = read_devices(excel_path, sheet_name)
+    need_open = [d for d in devices if d.scp_status.lower() in ("none", "")]
+    for d in need_open:
+        d.excel_path = excel_path
+
+    _run_step("open_scp", need_open, step_enable_scp, {})
+
+    # ========== 步骤3: 再次检查确认已开启 ==========
+    devices = read_devices(excel_path, sheet_name)
+    need_recheck = [d for d in devices if d.scp_status.lower() in ("none", "")]
+    for d in need_recheck:
+        d.excel_path = excel_path
+
+    _run_step("recheck_scp", need_recheck, step_check_scp, {})
+
+    # ========== 步骤4: 上传补丁文件 ==========
+    devices = read_devices(excel_path, sheet_name)
+    need_upload = [d for d in devices
+                   if d.upload_success.upper() != "OK"
+                   and d.scp_status.lower() != "none"
+                   and d.update_result.upper() != "SUCCESS"]
+    for d in need_upload:
+        d.excel_path = excel_path
+
+    _run_step("upload", need_upload, step_upload, {"patches_dir": patches_dir})
+
+    # ========== 步骤5: 激活补丁 ==========
+    devices = read_devices(excel_path, sheet_name)
+    need_activate = [d for d in devices
+                     if d.upload_success.upper() == "OK"
+                     and d.update_result.upper() != "SUCCESS"]
+    for d in need_activate:
+        d.excel_path = excel_path
+
+    step_results = _run_step("activate", need_activate, step_activate, {
+        "dry_run": dry_run,
+        "save": save_after_apply,
+        "cpu_threshold": cpu_threshold,
+        "mem_threshold": mem_threshold,
+        "patches_dir": patches_dir,
+        "run_id": run_id,
+    })
+    all_results.extend(step_results)
+
+    # ========== 步骤6: 汇总报告 ==========
+    # 将已成功/已跳过的设备也加入报告
+    devices = read_devices(excel_path, sheet_name)
+    for d in devices:
+        if d.update_result.upper() == "SUCCESS" and not any(r.hostname == d.hostname for r in all_results):
+            all_results.append(DeviceResult(
+                hostname=d.hostname,
+                mgmt_ip=d.mgmt_ip,
+                vendor=d.vendor,
+                status="skipped",
+                patch_applied=True,
+                error_message="Already completed in previous run",
+            ))
 
     # 打印汇总统计
-    success = sum(1 for r in results if r.status == "success")
-    partial = sum(1 for r in results if r.status == "partial")
-    failed = sum(1 for r in results if r.status == "failed")
-    skipped = sum(1 for r in results if r.status == "skipped")
+    success = sum(1 for r in all_results if r.status == "success")
+    partial = sum(1 for r in all_results if r.status == "partial")
+    failed = sum(1 for r in all_results if r.status == "failed")
+    skipped = sum(1 for r in all_results if r.status == "skipped")
 
     logger.info(f"=== Run {run_id} complete ===")
     logger.info(f"  Success: {success}  Partial: {partial}  Failed: {failed}  Skipped: {skipped}")
 
-    # 输出登录失败的设备列表
+    failed_logins = [r.hostname for r in all_results if r.status == "failed" and "LOGIN" in (r.error_message or "")]
     if failed_logins:
         logger.info(f"  Failed login devices ({len(failed_logins)}): {', '.join(failed_logins)}")
 
-    return results
+    # 打印格式化报告
+    print_report(all_results)
+    return all_results

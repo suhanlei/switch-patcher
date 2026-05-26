@@ -27,6 +27,7 @@ COLUMN_MAP = {
     "patch_file": "patch_file",
     "md5_base": "patch1_md5_base",
     "md5_uploaded": "patch1_md5_uploaded",
+    "scp_status": "scp_status",
     "login_mode": "login_mode",
     "upload_success": "upload_success",
     "update_result": "update_result",
@@ -41,10 +42,12 @@ class DeviceInfo:
     vendor: str
     patch_file: str
     row_index: int          # 在Excel中的行号（1-based），用于回写定位
+    excel_path: str = ""    # Excel文件路径（回写时需要，由batch_engine注入）
     patch_now: str = ""     # 当前补丁版本（工具回写）
     patch_new: str = ""     # 目标补丁版本（工具回写）
     md5_base: str = ""      # 本地补丁文件MD5（工具回写）
     md5_uploaded: str = ""   # 设备端文件MD5（工具回写）
+    scp_status: str = ""    # SCP/SFTP服务状态：none/scp/sftp/scp_sftp（工具回写）
     login_mode: str = ""    # 登录状态（工具回写）
     upload_success: str = ""  # 上传状态（工具回写）
     update_result: str = ""   # 升级结果（工具回写）
@@ -112,8 +115,9 @@ def read_devices(excel_path: str, sheet_name: str | None = None) -> list[DeviceI
         vendor = ws.cell(row=row_idx, column=col_indices.get("Vendor", 3)).value
         patch_file = ws.cell(row=row_idx, column=col_indices.get("patch_file", 6)).value
         patch_now = ws.cell(row=row_idx, column=col_indices.get("patch_now", 4)).value
-        upload_success = ws.cell(row=row_idx, column=col_indices.get("upload_success", 10)).value
-        update_result = ws.cell(row=row_idx, column=col_indices.get("update_result", 11)).value
+        upload_success = ws.cell(row=row_idx, column=col_indices.get("upload_success", 11)).value
+        update_result = ws.cell(row=row_idx, column=col_indices.get("update_result", 12)).value
+        scp_status = ws.cell(row=row_idx, column=col_indices.get("scp_status", 9)).value
 
         # 跳过空行
         if not hostname or not mgmt_ip:
@@ -128,6 +132,7 @@ def read_devices(excel_path: str, sheet_name: str | None = None) -> list[DeviceI
             patch_now=str(patch_now).strip() if patch_now else "",
             upload_success=str(upload_success).strip() if upload_success else "",
             update_result=str(update_result).strip() if update_result else "",
+            scp_status=str(scp_status).strip() if scp_status else "",
         ))
 
     wb.close()
