@@ -79,7 +79,7 @@ mkvirtualenv /home/virtual_path/switch-patcher
 workon switch-patcher
 
 # 安装依赖
-cd /path/to/switch-patcher
+cd /home/virtual_path/switch-patcher
 pip install -r requirements.txt
 ```
 
@@ -114,7 +114,7 @@ Mappings 标签页：
 `File → Settings → Project → Python Interpreter → ⚙ → Add → SSH Interpreter`
 
 ```
-Interpreter:  /home/virtual_path/switch-patcher/bin/python3
+Interpreter:  /home/virtual_path/switch-patcher/bin/python3.8
 ```
 
 配置完成后，kscc 或 PyCharm 修改代码 → 自动同步到服务器 → PyCharm Run 在服务器上执行。
