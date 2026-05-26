@@ -1,3 +1,10 @@
+"""
+SSH连接管理模块
+- 使用netmiko建立SSH连接，自动适配不同厂商的交互方式
+- 支持连接超时重试（默认2次，间隔2秒）
+- 认证失败不重试（密码错误再试也没用）
+"""
+
 import time
 import logging
 
@@ -9,8 +16,8 @@ from switch_patcher.excel_io import DeviceInfo
 
 logger = logging.getLogger(__name__)
 
-RETRY_ATTEMPTS = 2
-RETRY_DELAY = 2
+RETRY_ATTEMPTS = 2     # 连接重试次数
+RETRY_DELAY = 2        # 重试间隔（秒）
 
 
 def create_connection(
@@ -22,16 +29,23 @@ def create_connection(
     timeout: int = 30,
     retries: int = RETRY_ATTEMPTS,
 ) -> ConnectHandler:
+    """
+    建立SSH连接到目标设备
+    - 使用厂商档案中的netmiko_type自动选择设备驱动
+    - 超时/网络异常自动重试，认证失败直接报错
+    - 返回: netmiko连接对象
+    - 失败时抛出ConnectionError
+    """
     params = {
         "device_type": profile.netmiko_type,
         "host": device.mgmt_ip,
         "username": username,
         "password": password,
         "port": ssh_port,
-        "conn_timeout": timeout,
-        "auth_timeout": 20,
-        "banner_timeout": 20,
-        "global_cmd_verify": False,
+        "conn_timeout": timeout,        # 连接超时
+        "auth_timeout": 20,              # 认证超时
+        "banner_timeout": 20,            # Banner超时
+        "global_cmd_verify": False,      # 关闭全局命令确认，避免交互阻塞
     }
 
     last_err = None
@@ -41,9 +55,11 @@ def create_connection(
             logger.info(f"SSH connected to {device.mgmt_ip} (attempt {attempt})")
             return conn
         except NetmikoAuthenticationException as e:
+            # 认证失败，无需重试
             logger.error(f"Authentication failed for {device.mgmt_ip}: {e}")
             raise ConnectionError(f"Authentication failed: {device.mgmt_ip}") from e
         except (NetmikoTimeoutException, SSHException, OSError) as e:
+            # 超时或网络异常，记录后重试
             last_err = e
             logger.warning(f"SSH connection attempt {attempt}/{retries} failed for {device.mgmt_ip}: {e}")
             if attempt < retries:

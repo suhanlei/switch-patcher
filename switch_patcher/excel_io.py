@@ -1,3 +1,10 @@
+"""
+Excel读写模块
+- 读取设备清单（适配h3c_hosts格式，支持多Sheet选择）
+- 逐阶段回写执行状态到Excel（线程安全，带文件锁）
+- 计算本地补丁文件MD5
+"""
+
 import hashlib
 import threading
 from dataclasses import dataclass, field
@@ -7,8 +14,10 @@ from typing import Optional
 
 import openpyxl
 
+# 文件锁，防止多线程并发写Excel时数据错乱
 LOCK = threading.Lock()
 
+# 内部列名 → Excel表头的映射
 COLUMN_MAP = {
     "hostname": "Hostname",
     "mgmt_ip": "Mgmt_IP",
@@ -26,45 +35,48 @@ COLUMN_MAP = {
 
 @dataclass
 class DeviceInfo:
+    """从Excel读取的单台设备信息"""
     hostname: str
     mgmt_ip: str
     vendor: str
     patch_file: str
-    row_index: int  # 1-based row in Excel
-    patch_now: str = ""
-    patch_new: str = ""
-    md5_base: str = ""
-    md5_uploaded: str = ""
-    login_mode: str = ""
-    upload_success: str = ""
-    update_result: str = ""
+    row_index: int          # 在Excel中的行号（1-based），用于回写定位
+    patch_now: str = ""     # 当前补丁版本（工具回写）
+    patch_new: str = ""     # 目标补丁版本（工具回写）
+    md5_base: str = ""      # 本地补丁文件MD5（工具回写）
+    md5_uploaded: str = ""   # 设备端文件MD5（工具回写）
+    login_mode: str = ""    # 登录状态（工具回写）
+    upload_success: str = ""  # 上传状态（工具回写）
+    update_result: str = ""   # 升级结果（工具回写）
 
 
 @dataclass
 class DeviceResult:
+    """单台设备执行结果，用于汇总报告"""
     hostname: str
     mgmt_ip: str
     vendor: str
-    status: str = "pending"  # success / partial / failed / skipped
-    pre_check_ok: bool = False
-    transfer_ok: bool = False
-    patch_applied: bool = False
-    post_check_ok: bool = False
-    commands_total: int = 0
-    commands_applied: int = 0
-    commands_failed: int = 0
-    cpu_before: float | None = None
-    cpu_after: float | None = None
-    mem_before: float | None = None
-    mem_after: float | None = None
-    patch_now: str = ""
-    patch_new: str = ""
-    error_message: str = ""
-    start_time: datetime | None = None
-    end_time: datetime | None = None
+    status: str = "pending"     # success / partial / failed / skipped
+    pre_check_ok: bool = False  # 预检查是否通过
+    transfer_ok: bool = False   # 文件传输是否成功
+    patch_applied: bool = False  # 补丁是否已激活
+    post_check_ok: bool = False  # 后检查是否通过
+    commands_total: int = 0     # 总命令数
+    commands_applied: int = 0   # 成功执行命令数
+    commands_failed: int = 0    # 失败命令数
+    cpu_before: float | None = None   # 补丁前CPU使用率
+    cpu_after: float | None = None    # 补丁后CPU使用率
+    mem_before: float | None = None   # 补丁前内存使用率
+    mem_after: float | None = None    # 补丁后内存使用率
+    patch_now: str = ""         # 当前补丁版本
+    patch_new: str = ""         # 目标补丁版本
+    error_message: str = ""     # 错误信息
+    start_time: datetime | None = None  # 开始时间
+    end_time: datetime | None = None    # 结束时间
 
 
 def list_sheets(excel_path: str) -> list[str]:
+    """列出Excel中所有Sheet名称，用于灰度选择"""
     wb = openpyxl.load_workbook(excel_path, read_only=True)
     names = wb.sheetnames[:]
     wb.close()
@@ -72,6 +84,11 @@ def list_sheets(excel_path: str) -> list[str]:
 
 
 def read_devices(excel_path: str, sheet_name: str | None = None) -> list[DeviceInfo]:
+    """
+    从Excel读取设备清单
+    - sheet_name: 指定Sheet名称（灰度补丁），为None时使用活动Sheet
+    - 返回: DeviceInfo列表
+    """
     wb = openpyxl.load_workbook(excel_path, data_only=True)
     if sheet_name:
         if sheet_name not in wb.sheetnames:
@@ -81,6 +98,7 @@ def read_devices(excel_path: str, sheet_name: str | None = None) -> list[DeviceI
     else:
         ws = wb.active
 
+    # 解析表头，建立列名到列号的映射
     headers = [cell.value for cell in ws[1]]
     col_indices = {}
     for idx, h in enumerate(headers, 1):
@@ -97,6 +115,7 @@ def read_devices(excel_path: str, sheet_name: str | None = None) -> list[DeviceI
         upload_success = ws.cell(row=row_idx, column=col_indices.get("upload_success", 10)).value
         update_result = ws.cell(row=row_idx, column=col_indices.get("update_result", 11)).value
 
+        # 跳过空行
         if not hostname or not mgmt_ip:
             continue
 
@@ -116,6 +135,12 @@ def read_devices(excel_path: str, sheet_name: str | None = None) -> list[DeviceI
 
 
 def write_cell(excel_path: str, row_index: int, col_name: str, value: str):
+    """
+    回写单个单元格到Excel（线程安全）
+    - row_index: Excel行号
+    - col_name: 内部列名（如"login_mode"）
+    - value: 要写入的值
+    """
     col_key = COLUMN_MAP.get(col_name)
     if not col_key:
         return
@@ -124,6 +149,7 @@ def write_cell(excel_path: str, row_index: int, col_name: str, value: str):
         wb = openpyxl.load_workbook(excel_path)
         ws = wb.active
 
+        # 查找列号，若列不存在则自动追加
         headers = [cell.value for cell in ws[1]]
         col_idx = None
         for idx, h in enumerate(headers, 1):
@@ -141,6 +167,7 @@ def write_cell(excel_path: str, row_index: int, col_name: str, value: str):
 
 
 def calc_md5(file_path: str) -> str:
+    """计算本地文件的MD5哈希值，用于与设备端校验比对"""
     h = hashlib.md5()
     with open(file_path, "rb") as f:
         for chunk in iter(lambda: f.read(8192), b""):
