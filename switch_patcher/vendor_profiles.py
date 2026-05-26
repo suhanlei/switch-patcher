@@ -9,7 +9,7 @@
 import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Optional, List, Dict
 
 # YAML模板文件所在目录，与switch_patcher包同级
 TEMPLATES_DIR = Path(__file__).parent.parent / "vendor_templates"
@@ -82,25 +82,25 @@ class VendorProfile:
     remote_dir: str                          # 设备端补丁存放目录
     recv_buffer_size: int = 409600           # SSH接收缓冲区字节数
     connect_delay: float = 0                  # 连接前等待秒数
-    pre_check: list[CheckCommand] = field(default_factory=list)       # 补丁前健康检查命令列表
-    activate: list[ActivateCommand] = field(default_factory=list)     # 补丁激活命令列表
-    post_check: list[CheckCommand] = field(default_factory=list)       # 补丁后健康检查命令列表
-    rollback: list[ActivateCommand] = field(default_factory=list)      # 回退命令列表
-    scp_enable_commands: list[ScpEnableCommand] = field(default_factory=list)  # SCP/SFTP使能命令列表
-    check_scp_commands: list[ScpCheckCommand] = field(default_factory=list)    # SCP/SFTP状态检查命令列表
+    pre_check: List[CheckCommand] = field(default_factory=list)       # 补丁前健康检查命令列表
+    activate: List[ActivateCommand] = field(default_factory=list)     # 补丁激活命令列表
+    post_check: List[CheckCommand] = field(default_factory=list)       # 补丁后健康检查命令列表
+    rollback: List[ActivateCommand] = field(default_factory=list)      # 回退命令列表
+    scp_enable_commands: List[ScpEnableCommand] = field(default_factory=list)  # SCP/SFTP使能命令列表
+    check_scp_commands: List[ScpCheckCommand] = field(default_factory=list)    # SCP/SFTP状态检查命令列表
     save: str = ""                           # 保存配置的命令
     patch_id_pattern: str = ""               # 从输出中提取补丁版本号的正则表达式
-    error_patterns: list[str] = field(default_factory=list)  # 命令执行错误的匹配模式列表
+    error_patterns: List[str] = field(default_factory=list)  # 命令执行错误的匹配模式列表
     md5_command: str = ""                    # 设备端MD5校验命令模板
     verify_method: str = "md5"               # 文件校验方式：md5 或 size
 
 
-def _parse_check_list(items: list[dict]) -> list[CheckCommand]:
+def _parse_check_list(items: List[Dict]) -> List[CheckCommand]:
     """将YAML中的检查命令字典列表转换为CheckCommand对象列表"""
     return [CheckCommand(command=i["command"], key=i["key"]) for i in items]
 
 
-def _parse_activate_list(items: list[dict]) -> list[ActivateCommand]:
+def _parse_activate_list(items: List[Dict]) -> List[ActivateCommand]:
     """将YAML中的激活/回退命令字典列表转换为ActivateCommand对象列表"""
     result = []
     for i in items:
@@ -116,21 +116,21 @@ def _parse_activate_list(items: list[dict]) -> list[ActivateCommand]:
     return result
 
 
-def _parse_scp_enable_list(items: list[dict] | None) -> list[ScpEnableCommand]:
+def _parse_scp_enable_list(items: Optional[List[Dict]]) -> List[ScpEnableCommand]:
     """将YAML中的SCP使能命令字典列表转换为ScpEnableCommand对象列表"""
     if not items:
         return []
     return [ScpEnableCommand(command=i["command"], description=i.get("description", "")) for i in items]
 
 
-def _parse_scp_check_list(items: list[dict] | None) -> list[ScpCheckCommand]:
+def _parse_scp_check_list(items: Optional[List[Dict]]) -> List[ScpCheckCommand]:
     """将YAML中的SCP检查命令字典列表转换为ScpCheckCommand对象列表"""
     if not items:
         return []
     return [ScpCheckCommand(command=i["command"], key=i["key"]) for i in items]
 
 
-def load_profile(vendor: str, templates_dir: Path | None = None) -> VendorProfile:
+def load_profile(vendor: str, templates_dir: Optional[Path] = None) -> VendorProfile:
     """
     根据厂商名称加载对应的YAML命令模板
     - vendor: Excel中填写的厂商名（支持别名）

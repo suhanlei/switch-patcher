@@ -18,7 +18,7 @@ from pathlib import Path
 from switch_patcher.vendor_profiles import VendorProfile, format_command
 from switch_patcher.connection import create_connection
 from switch_patcher.file_transfer import check_connectivity, sftp_upload, verify_file_on_device
-from switch_patcher.health_check import run_health_checks, check_thresholds, verify_patch_applied, check_scp_sftp
+from switch_patcher.health_check import run_health_checks, verify_patch_applied, check_scp_sftp
 from switch_patcher.excel_io import DeviceInfo, DeviceResult, write_cell, calc_md5
 
 logger = logging.getLogger(__name__)
@@ -121,7 +121,6 @@ def step_upload(device: DeviceInfo, profile: VendorProfile, **kwargs) -> bool:
     步骤3: 上传补丁文件
     - 仅对upload_success≠OK的设备执行
     - 先检查本地补丁文件、计算MD5
-    - TCP连通性检查
     - SFTP上传 + 设备端文件校验
     - 返回: True=上传成功, False=失败
     """
@@ -141,11 +140,9 @@ def step_upload(device: DeviceInfo, profile: VendorProfile, **kwargs) -> bool:
     md5_local = calc_md5(str(local_patch_path))
     _write(device, "md5_base", md5_local)
 
-    # 连通性检查
-    if not check_connectivity(device.mgmt_ip, ssh_port):
-        logger.error(f"[{device.hostname}] Device unreachable")
-        _write(device, "scp_status", "unreachable")
-        _write(device, "update_result", "FAIL-UNREACHABLE")
+    # 校验设备状态（step_check_scp已完成检查，此处二次确认防止跳步调用）
+    if device.scp_status.lower() in ("unreachable", "login_fail"):
+        logger.warning(f"[{device.hostname}] Skip upload: scp_status={device.scp_status}")
         return False
 
     # SFTP上传
@@ -185,7 +182,7 @@ def step_activate(device: DeviceInfo, profile: VendorProfile, **kwargs) -> Devic
     """
     步骤4: 激活补丁
     - 仅对upload_success=OK且update_result≠SUCCESS的设备执行
-    - 预检查：健康检查 + 阈值判断
+    - 预检查：获取补丁版本 + H3C错误模式检测
     - 执行activate命令，处理Y/N交互和进度等待
     - 返回: DeviceResult对象
     """
@@ -195,8 +192,6 @@ def step_activate(device: DeviceInfo, profile: VendorProfile, **kwargs) -> Devic
     timeout = kwargs.get("timeout", 30)
     dry_run = kwargs.get("dry_run", False)
     save_after_apply = kwargs.get("save", False)
-    cpu_threshold = kwargs.get("cpu_threshold", 90.0)
-    mem_threshold = kwargs.get("mem_threshold", 90.0)
 
     result = DeviceResult(
         hostname=device.hostname,
@@ -216,15 +211,14 @@ def step_activate(device: DeviceInfo, profile: VendorProfile, **kwargs) -> Devic
 
     try:
         health_before = run_health_checks(conn, profile)
-        result.cpu_before = health_before.cpu_percent
-        result.mem_before = health_before.mem_percent
         result.patch_now = health_before.patch_id or ""
         _write(device, "patch_now", result.patch_now)
         _write(device, "patch_new", device.patch_file)
 
-        ok, reason = check_thresholds(health_before, cpu_threshold, mem_threshold)
-        if not ok:
-            logger.warning(f"[{device.hostname}] Pre-check threshold: {reason}")
+        # H3C补丁状态错误直接阻止激活
+        if health_before.patch_errors:
+            reason = f"Patch status error: {'; '.join(health_before.patch_errors)}"
+            logger.warning(f"[{device.hostname}] Pre-check: {reason}")
             _write(device, "update_result", f"SKIP-{reason}")
             result.status = "skipped"
             result.error_message = reason
@@ -233,7 +227,7 @@ def step_activate(device: DeviceInfo, profile: VendorProfile, **kwargs) -> Devic
             return result
 
         result.pre_check_ok = True
-        logger.info(f"[{device.hostname}] Pre-check OK: CPU={health_before.cpu_percent}%, MEM={health_before.mem_percent}%")
+        logger.info(f"[{device.hostname}] Pre-check OK")
     except Exception as e:
         logger.error(f"[{device.hostname}] Pre-check exception: {e}")
         _write(device, "update_result", "FAIL-PRECHECK")
@@ -306,12 +300,9 @@ def step_activate(device: DeviceInfo, profile: VendorProfile, **kwargs) -> Devic
     conn = _connect_with_retry(device, profile, username, password, ssh_port, timeout)
     if conn:
         try:
-            health_after = run_health_checks(conn, profile)
-            result.cpu_after = health_after.cpu_percent
-            result.mem_after = health_after.mem_percent
             result.post_check_ok = True
             result.patch_applied = verify_patch_applied(conn, profile, device.patch_file)
-            logger.info(f"[{device.hostname}] Post-check: CPU={health_after.cpu_percent}%, MEM={health_after.mem_percent}%, Patch={result.patch_applied}")
+            logger.info(f"[{device.hostname}] Post-check: Patch={result.patch_applied}")
         except Exception as e:
             logger.warning(f"[{device.hostname}] Post-check failed: {e}")
         finally:

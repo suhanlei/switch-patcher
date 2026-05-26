@@ -1,16 +1,16 @@
 """
 Excel读写模块
-- 读取设备清单（适配h3c_hosts格式，支持多Sheet选择）
+- 读取设备清单（支持多Sheet选择，按patch_hosts_template.xlsx格式）
 - 逐阶段回写执行状态到Excel（线程安全，带文件锁）
 - 计算本地补丁文件MD5
 """
 
 import hashlib
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 import openpyxl
 
@@ -70,18 +70,14 @@ class DeviceResult:
     commands_total: int = 0     # 总命令数
     commands_applied: int = 0   # 成功执行命令数
     commands_failed: int = 0    # 失败命令数
-    cpu_before: float | None = None   # 补丁前CPU使用率
-    cpu_after: float | None = None    # 补丁后CPU使用率
-    mem_before: float | None = None   # 补丁前内存使用率
-    mem_after: float | None = None    # 补丁后内存使用率
     patch_now: str = ""         # 当前补丁版本
     patch_new: str = ""         # 目标补丁版本
     error_message: str = ""     # 错误信息
-    start_time: datetime | None = None  # 开始时间
-    end_time: datetime | None = None    # 结束时间
+    start_time: Optional[datetime] = None  # 开始时间
+    end_time: Optional[datetime] = None    # 结束时间
 
 
-def list_sheets(excel_path: str) -> list[str]:
+def list_sheets(excel_path: str) -> List[str]:
     """列出Excel中所有Sheet名称，用于灰度选择"""
     wb = openpyxl.load_workbook(excel_path, read_only=True)
     names = wb.sheetnames[:]
@@ -89,7 +85,7 @@ def list_sheets(excel_path: str) -> list[str]:
     return names
 
 
-def read_devices(excel_path: str, sheet_name: str | None = None) -> list[DeviceInfo]:
+def read_devices(excel_path: str, sheet_name: Optional[str] = None) -> List[DeviceInfo]:
     """
     从Excel读取设备清单
     - sheet_name: 指定Sheet名称（灰度补丁），为None时使用活动Sheet
@@ -146,7 +142,7 @@ def read_devices(excel_path: str, sheet_name: str | None = None) -> list[DeviceI
     return devices
 
 
-def write_cell(excel_path: str, row_index: int, col_name: str, value: str, sheet_name: str | None = None):
+def write_cell(excel_path: str, row_index: int, col_name: str, value: str, sheet_name: Optional[str] = None):
     """
     回写单个单元格到Excel（线程安全）
     - row_index: Excel行号

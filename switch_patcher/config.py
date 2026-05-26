@@ -28,8 +28,6 @@ timeout: 30                    # 单条命令SSH超时秒数
 patches_dir: patches           # 补丁文件存放目录
 save: false                    # 激活后是否自动保存配置
 dry_run: false                 # 预检查模式（只做健康检查，不传输不激活）
-cpu_threshold: 90              # CPU使用率跳过阈值（%）
-mem_threshold: 90              # 内存使用率跳过阈值（%）
 """
 
 

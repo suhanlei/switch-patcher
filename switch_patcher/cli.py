@@ -10,6 +10,7 @@
 
 import argparse
 import sys
+from typing import Optional, List
 
 from switch_patcher.config import load_config, gen_config
 from switch_patcher.excel_io import read_devices, list_sheets
@@ -17,7 +18,7 @@ from switch_patcher.batch_engine import run_batch
 from switch_patcher.reporting import print_report
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     """定义并解析命令行参数"""
     parser = argparse.ArgumentParser(
         prog="switch_patcher",
@@ -42,8 +43,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--save", action="store_true", default=None, help="激活后自动保存配置（默认: 不保存）")
     parser.add_argument("--ssh-port", type=int, default=None, help="SSH端口（默认: 22）")
     parser.add_argument("--patches-dir", default=None, help="补丁文件目录（默认: patches）")
-    parser.add_argument("--cpu-threshold", type=float, default=None, help="CPU跳过阈值%%（默认: 90）")
-    parser.add_argument("--mem-threshold", type=float, default=None, help="内存跳过阈值%%（默认: 90）")
     return parser.parse_args(argv)
 
 
@@ -60,13 +59,11 @@ def _merge_config(args: argparse.Namespace, cfg: dict) -> dict:
         "patches_dir": args.patches_dir or cfg.get("patches_dir", "patches"),
         "save": args.save if args.save is not None else cfg.get("save", False),
         "dry_run": args.dry_run or cfg.get("dry_run", False),
-        "cpu_threshold": args.cpu_threshold or cfg.get("cpu_threshold", 90.0),
-        "mem_threshold": args.mem_threshold or cfg.get("mem_threshold", 90.0),
     }
     return merged
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     """主入口函数"""
     args = parse_args(argv)
 
@@ -114,8 +111,6 @@ def main(argv: list[str] | None = None) -> int:
         timeout=c["timeout"],
         dry_run=c["dry_run"],
         save_after_apply=c["save"],
-        cpu_threshold=c["cpu_threshold"],
-        mem_threshold=c["mem_threshold"],
         max_workers=c["workers"],
         patches_dir=c["patches_dir"],
     )

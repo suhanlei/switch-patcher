@@ -8,12 +8,13 @@
 import logging
 import sys
 from pathlib import Path
+from typing import Set
 
 LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(message)s"
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 _console_handler = None
-_initialized_loggers: set[str] = set()
+_initialized_loggers: Set[str] = set()
 
 
 def setup_console_logger(level: int = logging.INFO) -> None:

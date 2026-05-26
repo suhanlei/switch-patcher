@@ -7,12 +7,14 @@
 
 import logging
 from datetime import datetime
+from typing import List
+
 from switch_patcher.excel_io import DeviceResult
 
 logger = logging.getLogger("switch_patcher")
 
 
-def print_report(results: list[DeviceResult]) -> None:
+def print_report(results: List[DeviceResult]) -> None:
     """打印批量执行的汇总报告"""
     total = len(results)
     success = sum(1 for r in results if r.status == "success")
@@ -47,7 +49,8 @@ def print_report(results: list[DeviceResult]) -> None:
         print(f"  {status_tag:10s} {r.hostname:<40s} ({r.mgmt_ip}, {r.vendor}) - {detail}")
 
     # 单独列出登录失败的设备
-    failed_logins = [r for r in results if r.status == "failed" and "LOGIN" in r.error_message]
+    failed_logins = [r for r in results if r.status == "failed" and
+                     ("login_fail" in (r.error_message or "") or "FAIL-LOGIN" in (r.error_message or ""))]
     if failed_logins:
         print()
         print("  Failed login devices (re-run will retry these):")

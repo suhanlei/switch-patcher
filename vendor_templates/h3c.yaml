@@ -23,10 +23,6 @@ scp_enable_commands:
 pre_check:
   - command: display patch information
     key: patch_info
-  - command: display cpu-usage
-    key: cpu
-  - command: display memory
-    key: memory
   - command: display device
     key: device
 
@@ -42,10 +38,6 @@ activate:
 post_check:
   - command: display patch information
     key: patch_info
-  - command: display cpu-usage
-    key: cpu
-  - command: display memory
-    key: memory
 
 rollback:
   - command: "install deactivate patch flash:/{patch_file}"

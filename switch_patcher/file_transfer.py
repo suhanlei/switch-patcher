@@ -1,11 +1,10 @@
 """
 文件传输模块
-- TCP连通性检查：SSH前先探测端口，不可达直接标记UNREACHABLE
+- TCP连通性检查：SSH前先探测端口，不可达直接返回False
 - SFTP上传：通过paramiko SFTP通道将补丁文件推送到设备flash:/
 - 设备端文件校验：
   - H3C/锐捷：执行MD5命令，比对32位哈希值精确校验
   - 华为：执行dir命令查看文件大小，间接验证完整性（华为不支持md5sum）
-- 上传后通过SFTP stat比对文件大小做第一层校验
 """
 
 import os
@@ -13,6 +12,7 @@ import re
 import logging
 import socket
 from pathlib import Path
+from typing import Tuple
 
 import paramiko
 
@@ -92,7 +92,7 @@ def verify_file_on_device(
     profile: VendorProfile,
     patch_file: str,
     expected_md5: str = "",
-) -> tuple[bool, str]:
+) -> Tuple[bool, str]:
     """
     在设备端校验已上传的补丁文件
     - 根据厂商verify_method选择校验方式：

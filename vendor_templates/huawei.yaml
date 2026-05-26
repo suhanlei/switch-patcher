@@ -25,10 +25,6 @@ scp_enable_commands:
 pre_check:
   - command: display patch information
     key: patch_info
-  - command: display cpu-usage
-    key: cpu
-  - command: display memory-usage
-    key: memory
   - command: display device
     key: device
 
@@ -43,10 +39,6 @@ activate:
 post_check:
   - command: display patch information
     key: patch_info
-  - command: display cpu-usage
-    key: cpu
-  - command: display memory-usage
-    key: memory
 
 rollback:
   # 华为无法直接deactivate补丁，需要找到旧补丁文件并重新加载以覆盖

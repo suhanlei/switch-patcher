@@ -23,10 +23,6 @@ scp_enable_commands:
 pre_check:
   - command: show patch
     key: patch_info
-  - command: show cpu
-    key: cpu
-  - command: show memory
-    key: memory
   - command: show inventory
     key: device
 
@@ -54,10 +50,6 @@ activate:
 post_check:
   - command: show patch
     key: patch_info
-  - command: show cpu
-    key: cpu
-  - command: show memory
-    key: memory
 
 rollback:
   # 锐捷回退：patch delete删除补丁，也需等待100%完成

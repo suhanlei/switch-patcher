@@ -16,6 +16,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+from typing import Optional, List
 
 from switch_patcher.excel_io import DeviceResult, read_devices, list_sheets
 from switch_patcher.vendor_profiles import load_profile
@@ -28,18 +29,16 @@ logger = logging.getLogger("switch_patcher")
 
 def run_batch(
     excel_path: str,
-    sheet_name: str | None = None,
+    sheet_name: Optional[str] = None,
     username: str = "",
     password: str = "",
     ssh_port: int = 22,
     timeout: int = 30,
     dry_run: bool = False,
     save_after_apply: bool = False,
-    cpu_threshold: float = 90.0,
-    mem_threshold: float = 90.0,
     max_workers: int = 5,
     patches_dir: str = "patches",
-) -> list[DeviceResult]:
+) -> List[DeviceResult]:
     """
     分步编排执行批量补丁流程
     - 每步重新读取Excel，获取最新设备状态
@@ -52,11 +51,10 @@ def run_batch(
     setup_console_logger()
     logger.info(f"=== Patch run {run_id} started ===")
 
-    all_results: list[DeviceResult] = []
+    all_results: List[DeviceResult] = []
     progress_lock = threading.Lock()
 
     def _run_step(step_name: str, devices: list, step_func, step_kwargs: dict):
-        """执行单个步骤，多线程并发"""
         if not devices:
             logger.info(f"Step [{step_name}]: No devices to process, skipping")
             return []
@@ -165,8 +163,6 @@ def run_batch(
     step_results = _run_step("activate", need_activate, step_activate, {
         "dry_run": dry_run,
         "save": save_after_apply,
-        "cpu_threshold": cpu_threshold,
-        "mem_threshold": mem_threshold,
         "patches_dir": patches_dir,
         "run_id": run_id,
     })
@@ -196,7 +192,8 @@ def run_batch(
     logger.info(f"=== Run {run_id} complete ===")
     logger.info(f"  Success: {success}  Partial: {partial}  Failed: {failed}  Skipped: {skipped}")
 
-    failed_logins = [r.hostname for r in all_results if r.status == "failed" and "LOGIN" in (r.error_message or "")]
+    failed_logins = [r.hostname for r in all_results if r.status == "failed" and
+                     ("login_fail" in (r.error_message or "") or "FAIL-LOGIN" in (r.error_message or ""))]
     if failed_logins:
         logger.info(f"  Failed login devices ({len(failed_logins)}): {', '.join(failed_logins)}")
 

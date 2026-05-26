@@ -8,15 +8,15 @@
 - **一条命令执行** — 编辑 `patch_config.yaml` 后，`python -m switch_patcher` 一键完成全流程
 - **Excel驱动** — 设备列表和执行进度都在同一个Excel中，工具实时回写状态列
 - **灰度补丁** — 支持选择Excel中的不同Sheet，分批次执行
-- **自动分步编排** — 自动执行：检查SCP→开启SCP→重新确认→上传补丁→激活补丁→后检查
-- **Excel字段驱动跳过** — 基于Excel中的 scp_status、upload_success、update_result 字段自动跳过已完成步骤，无需手动传参
+- **6步自动编排** — check_scp → open_scp → recheck_scp → upload → activate → finalize
+- **Excel字段驱动跳过** — 基于 scp_status、upload_success、update_result 字段自动跳过已完成步骤，无需手动传参
 - **文件传输** — SFTP上传补丁文件，上传后MD5/文件大小校验确保完整性
-- **健康检查** — 打补丁前后检查CPU/内存/设备状态，超阈值自动跳过
+- **健康检查** — 打补丁前后检查补丁状态和设备信息，H3C自动检测补丁已激活/不兼容
 - **交互式命令** — 自动处理补丁激活时的Y/N确认提示（H3C install activate、华为 patch load）
-- **锐捷3步流程** — upgrade→active→running，每步等待进度100%完成
+- **锐捷3步流程** — upgrade → active → running，每步等待进度100%完成
 - **H3C补丁检测** — 自动检测"已激活"和"不兼容"错误，避免重复操作
 - **SCP/SFTP状态检查** — 先检查设备是否已开启SCP/SFTP，已开启的自动跳过
-- **登录重试** — TCP连通性前置检查 + SSH登录失败3次重试（间隔3秒）
+- **登录重试** — SSH登录失败3次重试（间隔3秒），TCP连通性前置检查
 - **锐捷限速** — 连接锐捷设备前自动等待1秒，避免过快连接被拒绝
 - **H3C大缓冲** — H3C设备使用40MB接收缓冲区，适应display命令大量输出
 - **死循环保护** — 所有while循环最多60次迭代后强制退出
@@ -33,13 +33,13 @@ switch-patcher/
 ├── switch_patcher/              # 主程序包
 │   ├── __init__.py               # 版本号
 │   ├── __main__.py               # python -m switch_patcher 入口
-│   ├── cli.py                    # 命令行参数定义（支持配置文件覆盖）
+│   ├── cli.py                    # 命令行参数解析，配置文件合并
 │   ├── config.py                 # patch_config.yaml 加载与生成
 │   ├── excel_io.py               # Excel读写 + MD5计算 + 线程安全回写
-│   ├── vendor_profiles.py        # YAML厂商模板加载 + 占位符替换
-│   ├── connection.py             # netmiko SSH连接 + 重试逻辑
+│   ├── vendor_profiles.py         # YAML厂商模板加载 + 占位符替换
+│   ├── connection.py              # netmiko SSH连接（单次尝试，重试由上层控制）
 │   ├── file_transfer.py          # SFTP上传 + TCP连通性检查 + 设备端文件校验
-│   ├── health_check.py           # CPU/内存/补丁版本正则解析 + SCP状态检查 + 阈值判断
+│   ├── health_check.py           # 补丁版本解析 + H3C错误检测 + SCP状态检查
 │   ├── device_worker.py          # 单设备各步骤函数（check_scp/enable_scp/upload/activate等）
 │   ├── batch_engine.py           # 6步编排调度 + ThreadPoolExecutor并发 + 进度追踪
 │   ├── reporting.py              # 执行汇总报告 + 失败设备清单
@@ -67,7 +67,7 @@ switch-patcher/
 
 ### 1. Python版本
 
-Python 3.10+
+Python 3.8+
 
 ### 2. 创建虚拟环境并安装依赖
 
@@ -98,16 +98,16 @@ python -m switch_patcher --help
 | Hostname | 设备主机名 | 人工填写 |
 | Mgmt_IP | 管理口IP | 人工填写 |
 | Vendor | 厂商（h3c / huawei / ruijie） | 人工填写 |
+| patch_file | 补丁文件名 | 人工填写 |
 | patch_now | 当前补丁版本 | **工具回写** |
 | patch_new | 目标补丁版本 | **工具回写** |
-| patch_file | 补丁文件名 | 人工填写 |
 | patch1_md5_base | 本地补丁文件MD5 | **工具回写** |
 | patch1_md5_uploaded | 设备端文件MD5 | **工具回写** |
 | scp_status | 设备连接与服务状态 | **工具回写** |
 | upload_success | 上传状态（OK/FAIL） | **工具回写** |
 | update_result | 升级结果（SUCCESS/PARTIAL/FAIL-xxx） | **工具回写** |
 
-人工只需填写前6列（Hostname ~ patch_file），后5列由工具在执行过程中逐步回写。
+人工只需填写 Hostname、Mgmt_IP、Vendor、patch_file 四列，其余7列由工具在执行过程中逐步回写。
 
 `scp_status` 合并了原 `login_mode` 字段，一个字段同时表达连接状态和服务状态：
 
@@ -149,31 +149,38 @@ check_scp_commands:
 # SCP/SFTP前置使能命令（仅对scp_status=none的设备执行）
 scp_enable_commands:
   - command: system-view
+    description: 进入系统视图
   - command: scp server enable
+    description: 启用SCP服务
   - command: sftp server enable
+    description: 启用SFTP服务
 
 pre_check:
   - command: display patch information
-  - command: display cpu-usage
-  - command: display memory
+    key: patch_info
   - command: display device
+    key: device
 
 activate:
   # H3C install activate命令会提示[Y/N]确认，需自动回答Y
   - command: "install activate patch flash:/{patch_file}"
+    description: 激活补丁（交互式，需确认Y）
     expect_pattern: "[Yy]/[Nn]"
     auto_reply: "Y"
   - command: install commit
+    description: 确认补丁
 
 post_check:
   - command: display patch information
-  - command: display cpu-usage
-  - command: display memory
+    key: patch_info
 
 rollback:
   - command: "install deactivate patch flash:/{patch_file}"
+    description: 去激活补丁
   - command: install commit
+    description: 确认去激活
   - command: "delete flash:/{patch_file}"
+    description: 删除补丁文件(可选)
 
 save: save force
 error_patterns:
@@ -208,32 +215,39 @@ check_scp_commands:
 # SCP/SFTP前置使能命令（仅对scp_status=none的设备执行）
 scp_enable_commands:
   - command: system-view
+    description: 进入系统视图
   - command: scp server enable
+    description: 启用SCP服务
   - command: sftp server enable
-  - command: commit   # 华为CE系列需commit生效
+    description: 启用SFTP服务
+  - command: commit
+    description: 提交配置（华为CE系列需要commit生效）
 
 pre_check:
   - command: display patch information
-  - command: display cpu-usage
-  - command: display memory-usage
+    key: patch_info
   - command: display device
+    key: device
 
 activate:
   # 华为 patch load 一步完成安装并激活，all run表示对所有槽位立即生效
   # 命令会提示[Y/N]确认，需自动回答Y
   - command: "patch load {patch_file} all run"
+    description: 加载并运行补丁（交互式，需确认Y）
     expect_pattern: "[Yy]/[Nn]"
     auto_reply: "Y"
 
 post_check:
   - command: display patch information
-  - command: display cpu-usage
-  - command: display memory-usage
+    key: patch_info
 
 rollback:
   - command: "patch deactivate {patch_id}"
+    description: 去激活补丁
   - command: "patch delete {patch_id}"
+    description: 删除补丁
   - command: "delete flash:/{patch_file}"
+    description: 删除补丁文件
 
 save: save
 # 华为不支持md5sum命令，通过dir查看文件大小间接验证完整性
@@ -261,42 +275,58 @@ check_scp_commands:
 # SCP/SFTP前置使能命令（仅对scp_status=none的设备执行）
 scp_enable_commands:
   - command: configure terminal
+    description: 进入配置模式
   - command: ip scp server enable
+    description: 启用SCP服务
 
 pre_check:
   - command: show patch
-  - command: show cpu
-  - command: show memory
+    key: patch_info
   - command: show inventory
+    key: device
 
-# 锐捷补丁需3步操作，每步都需等待100%完成
+# 锐捷补丁需3步操作，每步都需等待100%完成：
+# 1. upgrade flash:{patch} — 安装补丁包，等待进度100%
+# 2. patch active — 激活补丁，等待进度100%
+# 3. patch running — 使补丁运行生效，等待进度100%
 activate:
   - command: "upgrade flash:/{patch_file}"
+    description: 安装补丁（等待100%完成）
     wait_progress: true
     progress_pattern: "\\d+%"
     complete_pattern: "100%"
   - command: patch active
+    description: 激活补丁（等待100%完成）
     wait_progress: true
     progress_pattern: "\\d+%"
     complete_pattern: "100%"
   - command: patch running
+    description: 使补丁运行生效（等待100%完成）
     wait_progress: true
     progress_pattern: "\\d+%"
     complete_pattern: "100%"
 
 post_check:
   - command: show patch
-  - command: show cpu
-  - command: show memory
+    key: patch_info
 
 rollback:
+  # 锐捷回退：patch delete删除补丁，也需等待100%完成
   - command: patch delete
+    description: 删除补丁（等待100%完成）
     wait_progress: true
     progress_pattern: "\\d+%"
     complete_pattern: "100%"
   - command: "delete flash:/{patch_file}"
+    description: 删除补丁文件
 
 save: write
+patch_id_pattern: "Patch name:\\s*(\\S+)"
+error_patterns:
+  - "% Invalid input"
+  - "% Incomplete command"
+  - "% Ambiguous command"
+  - "% Error"
 md5_command: "verify flash:/{patch_file}"
 verify_method: md5
 ```
@@ -361,14 +391,15 @@ python -m switch_patcher h3c_hosts.xlsx --sheet batch1 --username admin --passwo
 CLI参数优先级高于配置文件：
 
 ```bash
-python -m switch_patcher --workers 10 --save --cpu-threshold 80
+python -m switch_patcher --workers 10 --save
 ```
 
 ### 断点续跑
 
 重复执行时，工具自动基于Excel字段跳过已完成步骤：
+
 - `scp_status` 已有值（scp/sftp/scp_sftp） → 跳过SCP检查和开启
-- `scp_status=unreachable` 或 `login_fail` → 跳过该设备（下次重试时自动重新检查）
+- `scp_status=unreachable` 或 `login_fail` → 跳过该设备（下次重试时如果恢复会重新检查）
 - `upload_success=OK` → 跳过文件上传
 - `update_result=SUCCESS` → 跳过补丁激活
 
@@ -397,10 +428,6 @@ python -m switch_patcher [input] [options]
   --ssh-port PORT             SSH端口（默认: 22）
   --patches-dir DIR           补丁文件存放目录（默认: patches）
 
-健康检查:
-  --cpu-threshold %           CPU使用率跳过阈值（默认: 90）
-  --mem-threshold %           内存使用率跳过阈值（默认: 90）
-
 参数优先级: CLI参数 > patch_config.yaml > 默认值
 ```
 
@@ -411,7 +438,7 @@ python -m switch_patcher [input] [options]
 ```
 步骤1: check_scp — 检查设备SCP/SFTP状态
   │  先TCP探测端口，不可达直接写 scp_status=unreachable
-  │  SSH登录执行check_scp_commands
+  │  SSH登录执行check_scp_commands（3次重试）
   │  检测输出中的 scp server enable / sftp server enable 关键字
   │  写入scp_status列: scp / sftp / scp_sftp / none / unreachable / login_fail
   │  已有scp_status的设备自动跳过
@@ -427,13 +454,13 @@ python -m switch_patcher [input] [options]
   ▼
 步骤4: upload — 上传补丁文件
   │  只对upload_success≠OK且scp_status为scp/sftp/scp_sftp的设备执行
-  │  本地文件校验 → TCP连通性检查 → SFTP上传 → 设备端MD5/大小校验
+  │  本地文件校验 → SFTP上传 → 设备端MD5/大小校验
   │  校验通过 → 写upload_success=OK
   │  校验失败 → 写upload_success=FAIL，不进入激活
   ▼
 步骤5: activate — 激活补丁（--dry-run到此结束）
   │  只对upload_success=OK且update_result≠SUCCESS且scp_status不为unreachable/login_fail的设备执行
-  │  预检查：健康检查 + 阈值判断
+  │  预检查：获取补丁版本 + H3C错误模式检测
   │  进入config模式，逐条执行activate命令
   │  交互式命令自动回复Y/N，锐捷3步等待进度100%
   │  每条检查error_patterns（含H3C"已激活"/"不兼容"）
@@ -490,21 +517,23 @@ python -m switch_patcher
 `patch_config.yaml` 示例：
 
 ```yaml
-# 必填项
-excel: "h3c_hosts.xlsx"      # Excel文件路径（相对或绝对）
-sheet: "batch1"               # Sheet名称（灰度分批）
-username: "admin"             # SSH用户名
-password: "MyPassword123"     # SSH密码
+# Switch Patcher 补丁执行配置文件
+# 执行命令：python -m switch_patcher（自动读取此文件）
+# CLI参数会覆盖此文件中的对应值
 
-# 可选项（以下为默认值）
-ssh_port: 22
-workers: 5
-timeout: 30
-patches_dir: patches
-save: false
-dry_run: false
-cpu_threshold: 90
-mem_threshold: 90
+# === 必填项 ===
+excel: ""                     # Excel文件路径（相对或绝对路径）
+sheet: ""                     # 要处理的Sheet名称（灰度分批）
+username: ""                  # SSH用户名（所有设备统一）
+password: ""                  # SSH密码（所有设备统一）
+
+# === 可选项 ===
+ssh_port: 22                  # SSH端口
+workers: 5                     # 最大并发设备连接数
+timeout: 30                   # 单条命令SSH超时秒数
+patches_dir: patches           # 补丁文件存放目录
+save: false                    # 激活后是否自动保存配置
+dry_run: false                # 预检查模式（只做健康检查，不传输不激活）
 ```
 
 生成方式：
