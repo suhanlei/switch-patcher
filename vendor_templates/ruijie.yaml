@@ -1,6 +1,17 @@
 vendor: Ruijie
 netmiko_type: ruijie_os
 remote_dir: "flash:/"
+# 锐捷设备默认接收缓冲区大小
+recv_buffer_size: 409600
+# 锐捷设备连接前需等待1秒（限速保护，避免过快连接导致设备拒绝）
+connect_delay: 1
+
+# SCP/SFTP前置使能命令（补丁文件传输前需确保设备已启用SCP服务）
+scp_enable_commands:
+  - command: configure terminal
+    description: 进入配置模式
+  - command: ip scp server enable
+    description: 启用SCP服务
 
 pre_check:
   - command: show patch
@@ -12,9 +23,26 @@ pre_check:
   - command: show inventory
     key: device
 
+# 锐捷补丁需3步操作，每步都需等待100%完成：
+# 1. upgrade flash:{patch} — 安装补丁包，等待进度100%
+# 2. patch active — 激活补丁，等待进度100%
+# 3. patch running — 使补丁运行生效，等待进度100%
 activate:
-  - command: "patch install flash:/{patch_file}"
-    description: 安装并激活补丁
+  - command: "upgrade flash:/{patch_file}"
+    description: 安装补丁（等待100%完成）
+    wait_progress: true
+    progress_pattern: "\\d+%"
+    complete_pattern: "100%"
+  - command: patch active
+    description: 激活补丁（等待100%完成）
+    wait_progress: true
+    progress_pattern: "\\d+%"
+    complete_pattern: "100%"
+  - command: patch running
+    description: 使补丁运行生效（等待100%完成）
+    wait_progress: true
+    progress_pattern: "\\d+%"
+    complete_pattern: "100%"
 
 post_check:
   - command: show patch
@@ -25,8 +53,12 @@ post_check:
     key: memory
 
 rollback:
-  - command: "patch remove {patch_id}"
-    description: 移除补丁
+  # 锐捷回退：patch delete删除补丁，也需等待100%完成
+  - command: patch delete
+    description: 删除补丁（等待100%完成）
+    wait_progress: true
+    progress_pattern: "\\d+%"
+    complete_pattern: "100%"
   - command: "delete flash:/{patch_file}"
     description: 删除补丁文件
 
@@ -38,3 +70,5 @@ error_patterns:
   - "% Ambiguous command"
   - "% Error"
 md5_command: "verify flash:/{patch_file}"
+# 文件校验方式：锐捷使用verify命令校验文件完整性
+verify_method: md5

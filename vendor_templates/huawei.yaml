@@ -1,6 +1,19 @@
 vendor: Huawei
 netmiko_type: huawei
 remote_dir: "flash:/"
+# 华为设备默认接收缓冲区大小
+recv_buffer_size: 409600
+
+# SCP/SFTP前置使能命令（补丁文件传输前需确保设备已启用SCP/SFTP服务）
+scp_enable_commands:
+  - command: system-view
+    description: 进入系统视图
+  - command: scp server enable
+    description: 启用SCP服务
+  - command: sftp server enable
+    description: 启用SFTP服务
+  - command: commit
+    description: 提交配置（华为CE系列需要commit生效）
 
 pre_check:
   - command: display patch information
@@ -13,10 +26,12 @@ pre_check:
     key: device
 
 activate:
-  - command: "patch install {patch_file} flash:/"
-    description: 安装补丁
-  - command: "patch activate {patch_id}"
-    description: 激活补丁
+  # 华为补丁使用 patch load 命令一次性完成安装并激活，all run表示对所有槽位立即生效
+  # 命令会提示确认，需自动回答Y
+  - command: "patch load {patch_file} all run"
+    description: 加载并运行补丁（交互式，需确认Y）
+    expect_pattern: "[Yy]/[Nn]"
+    auto_reply: "Y"
 
 post_check:
   - command: display patch information
@@ -27,6 +42,8 @@ post_check:
     key: memory
 
 rollback:
+  # 华为无法直接deactivate补丁，需要找到旧补丁文件并重新加载以覆盖
+  # 回退时需人工确认旧补丁文件已存在于flash中
   - command: "patch deactivate {patch_id}"
     description: 去激活补丁
   - command: "patch delete {patch_id}"
@@ -43,4 +60,7 @@ error_patterns:
   - "Ambiguous command"
   - "Wrong parameter"
   - "Failed"
+# 华为不支持md5sum命令，通过dir查看文件大小间接验证完整性
 md5_command: "dir flash:/{patch_file}"
+# 文件校验方式：华为使用文件大小比对（设备不支持MD5命令）
+verify_method: size

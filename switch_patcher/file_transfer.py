@@ -2,7 +2,10 @@
 文件传输模块
 - TCP连通性检查：SSH前先探测端口，不可达直接标记UNREACHABLE
 - SFTP上传：通过paramiko SFTP通道将补丁文件推送到设备flash:/
-- 设备端文件校验：上传后执行MD5/文件大小命令比对完整性
+- 设备端文件校验：
+  - H3C/锐捷：执行MD5命令，比对32位哈希值精确校验
+  - 华为：执行dir命令查看文件大小，间接验证完整性（华为不支持md5sum）
+- 上传后通过SFTP stat比对文件大小做第一层校验
 """
 
 import os
@@ -92,14 +95,33 @@ def verify_file_on_device(
 ) -> tuple[bool, str]:
     """
     在设备端校验已上传的补丁文件
-    - 优先使用MD5比对：执行设备端md5sum命令，提取32位hex与本地比对
-    - MD5不可用时退化为文件大小检查：通过dir命令输出判断文件是否存在
-    - 返回: (是否验证通过, 设备端MD5或文件大小或错误信息)
+    - 根据厂商verify_method选择校验方式：
+      - md5方式（H3C/锐捷）：执行md5sum/verify命令，提取32位hex与本地比对
+      - size方式（华为）：执行dir命令，检查文件大小是否大于0
+    - 返回: (是否验证通过, 设备端校验值或错误信息)
     """
+    verify_method = getattr(profile, "verify_method", "md5")
     md5_cmd = format_command(profile.md5_command, patch_file=patch_file)
+
     try:
         output = conn.send_command(md5_cmd, read_timeout=120)
 
+        if verify_method == "size":
+            # 华为文件大小校验：从dir命令输出中提取文件大小
+            # dir输出格式如："2024/01/15 10:30:00  52428800  S9855-CMW910-SYSTEM-R9131HS02.bin"
+            size_match = re.search(r"(\d+)\s+" + re.escape(patch_file.split("/")[-1]), output)
+            if size_match and int(size_match.group(1)) > 0:
+                logger.info(f"File size verified for {patch_file}: {size_match.group(1)} bytes")
+                return True, size_match.group(1)
+            # 备用模式：更宽松地匹配文件名和大小
+            size_match = re.search(r"(\d{6,})\s+\S*\s*" + re.escape(patch_file.split("/")[-1]), output)
+            if size_match and int(size_match.group(1)) > 0:
+                logger.info(f"File size verified (loose match) for {patch_file}: {size_match.group(1)} bytes")
+                return True, size_match.group(1)
+            logger.error(f"File size verification failed for {patch_file}, output: {output[:200]}")
+            return False, output[:200]
+
+        # 默认MD5校验方式（H3C/锐捷）
         if expected_md5:
             # 从输出中提取32位MD5哈希值
             md5_match = re.search(r"([a-fA-F0-9]{32})", output)
@@ -111,12 +133,11 @@ def verify_file_on_device(
                 else:
                     logger.error(f"MD5 mismatch: local={expected_md5}, device={device_md5}")
                     return False, device_md5
-            # MD5命令未输出哈希值，退化为文件大小检查
 
-        # 退化为检查文件是否存在（通过dir命令输出中的文件名和大小）
-        size_match = re.search(r"(\d+)\s+" + re.escape(patch_file.split("/")[-1]), output)
-        if size_match:
-            return True, size_match.group(1)
+        # 未提供预期MD5时，退化为检查文件是否存在于输出中
+        if patch_file.split("/")[-1] in output:
+            logger.info(f"File existence verified for {patch_file}")
+            return True, "exists"
 
         return False, output[:200]
 

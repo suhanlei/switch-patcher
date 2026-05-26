@@ -3,6 +3,8 @@ SSH连接管理模块
 - 使用netmiko建立SSH连接，自动适配不同厂商的交互方式
 - 支持连接超时重试（默认2次，间隔2秒）
 - 认证失败不重试（密码错误再试也没用）
+- H3C设备使用40MB大接收缓冲区（display输出量大）
+- 锐捷设备连接前等待1秒（限速保护，避免过快连接导致设备拒绝）
 """
 
 import time
@@ -33,9 +35,16 @@ def create_connection(
     建立SSH连接到目标设备
     - 使用厂商档案中的netmiko_type自动选择设备驱动
     - 超时/网络异常自动重试，认证失败直接报错
+    - H3C设备自动设置大接收缓冲区（40MB）
+    - 锐捷设备连接前自动等待1秒（限速保护）
     - 返回: netmiko连接对象
     - 失败时抛出ConnectionError
     """
+    # 锐捷设备连接前等待：限速保护，避免过快连接导致设备拒绝
+    if profile.connect_delay > 0:
+        logger.debug(f"[{device.hostname}] Rate limit: sleeping {profile.connect_delay}s before connect")
+        time.sleep(profile.connect_delay)
+
     params = {
         "device_type": profile.netmiko_type,
         "host": device.mgmt_ip,
@@ -47,6 +56,10 @@ def create_connection(
         "banner_timeout": 20,            # Banner超时
         "global_cmd_verify": False,      # 关闭全局命令确认，避免交互阻塞
     }
+
+    # H3C设备需要更大的接收缓冲区（display输出量大，40MB vs 默认400KB）
+    if profile.recv_buffer_size != 409600:
+        params["recv_buffer_size"] = profile.recv_buffer_size
 
     last_err = None
     for attempt in range(1, retries + 1):

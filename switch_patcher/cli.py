@@ -48,6 +48,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--patches-dir", default="patches", help="Directory containing patch files (default: patches)")
     # 跳过已上传成功的设备
     parser.add_argument("--skip-uploaded", action="store_true", help="Skip devices where upload_success=OK")
+    # SCP/SFTP使能（文件传输前自动启用）
+    parser.add_argument("--enable-scp", action="store_true", default=True, help="Auto-enable SCP/SFTP before transfer (default: True)")
+    parser.add_argument("--no-enable-scp", action="store_false", dest="enable_scp", help="Skip SCP/SFTP enable step")
     return parser.parse_args(argv)
 
 
@@ -91,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         mem_threshold=args.mem_threshold,
         max_workers=args.workers,
         skip_uploaded=args.skip_uploaded,
+        enable_scp=args.enable_scp,
     )
 
     # 打印汇总报告

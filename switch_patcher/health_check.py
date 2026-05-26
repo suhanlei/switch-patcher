@@ -4,6 +4,7 @@
 - 通过正则表达式解析各厂商不同格式的输出
 - 阈值判断：CPU或内存超过设定值则建议跳过
 - 补丁版本提取：从display patch information中提取当前补丁名
+- H3C特有错误模式检测：补丁已激活、补丁不兼容
 """
 
 import re
@@ -30,6 +31,13 @@ MEM_PATTERNS = {
     "RUIJIE": [r"[Mm]emory\s+[Uu]tilization[:\s]*(\d+)%", r"(\d+)%"],
 }
 
+# H3C特有错误模式：补丁已激活或补丁不兼容（从display patch information输出检测）
+H3C_PATCH_ERROR_PATTERNS = [
+    r"cannot be activated again",    # 补丁已激活，不能重复激活
+    r"not compliant",                # 补丁与设备不兼容
+    r"does not exist",               # 补丁文件不存在
+]
+
 
 @dataclass
 class HealthStatus:
@@ -39,12 +47,15 @@ class HealthStatus:
     raw_output: dict[str, str] | None = None  # 各命令的原始输出（供人工复查）
     patch_id: str | None = None            # 当前补丁版本号
     warnings: list[str] | None = None      # 解析过程中的警告信息
+    patch_errors: list[str] | None = None  # H3C补丁状态错误信息
 
     def __post_init__(self):
         if self.raw_output is None:
             self.raw_output = {}
         if self.warnings is None:
             self.warnings = []
+        if self.patch_errors is None:
+            self.patch_errors = []
 
 
 def _parse_percent(output: str, patterns: list[str]) -> float | None:
@@ -68,6 +79,7 @@ def run_health_checks(
     - 依次执行pre_check中定义的命令
     - 解析CPU、内存、补丁版本
     - 解析失败时记录警告但不中断流程
+    - H3C设备额外检测补丁状态错误模式
     """
     result = HealthStatus()
     vendor = profile.vendor.upper()
@@ -93,6 +105,13 @@ def run_health_checks(
                 m = re.search(profile.patch_id_pattern, output)
                 if m:
                     result.patch_id = m.group(1).strip()
+                # H3C设备额外检测补丁状态错误模式
+                if vendor_key == "H3C":
+                    for err_pat in H3C_PATCH_ERROR_PATTERNS:
+                        err_match = re.search(err_pat, output, re.IGNORECASE)
+                        if err_match:
+                            result.patch_errors.append(err_match.group(0))
+                            logger.warning(f"H3C patch status error detected: {err_match.group(0)}")
         except Exception as e:
             logger.warning(f"Health check command '{cmd.key}' failed: {e}")
             result.warnings.append(f"{cmd.key}: {e}")
@@ -109,8 +128,13 @@ def check_thresholds(
     判断设备健康状态是否满足打补丁条件
     - CPU或内存超过阈值 → 不通过
     - CPU和内存都解析失败 → 不通过（无法评估风险）
+    - H3C设备检测到补丁状态错误 → 不通过
     - 返回: (是否通过, 原因描述)
     """
+    # H3C补丁状态错误直接阻止激活
+    if health.patch_errors:
+        return False, f"Patch status error: {'; '.join(health.patch_errors)}"
+
     if health.cpu_percent is not None and health.cpu_percent > cpu_threshold:
         return False, f"CPU {health.cpu_percent}% > threshold {cpu_threshold}%"
     if health.mem_percent is not None and health.mem_percent > mem_threshold:

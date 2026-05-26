@@ -1,6 +1,17 @@
 vendor: H3C
 netmiko_type: hp_comware
 remote_dir: "flash:/"
+# H3C设备display输出量大，需要更大的接收缓冲区（40MB，其他厂商仅400KB）
+recv_buffer_size: 40960000
+
+# SCP/SFTP前置使能命令（补丁文件传输前需确保设备已启用SCP/SFTP服务）
+scp_enable_commands:
+  - command: system-view
+    description: 进入系统视图
+  - command: scp server enable
+    description: 启用SCP服务
+  - command: sftp server enable
+    description: 启用SFTP服务
 
 pre_check:
   - command: display patch information
@@ -14,7 +25,10 @@ pre_check:
 
 activate:
   - command: "install activate patch flash:/{patch_file}"
-    description: 激活补丁
+    description: 激活补丁（交互式，需确认Y）
+    # H3C install activate命令会提示"Continue?[Y/N]:", 需自动回答Y
+    expect_pattern: "[Yy]/[Nn]"
+    auto_reply: "Y"
   - command: install commit
     description: 确认补丁
 
@@ -44,4 +58,9 @@ error_patterns:
   - "Wrong parameter"
   - "Failed to"
   - "No such file"
+  # H3C特有错误模式：补丁已激活或补丁不兼容
+  - "cannot be activated again"
+  - "not compliant"
 md5_command: "md5sum flash:/{patch_file}"
+# 文件校验方式：H3C使用MD5哈希值精确校验
+verify_method: md5

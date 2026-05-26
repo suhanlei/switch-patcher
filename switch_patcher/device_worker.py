@@ -5,6 +5,11 @@
 - 每个阶段完成后立即回写Excel，支持断点续跑
 - SSH登录失败自动3次重试，间隔3秒
 - 已成功的设备自动跳过，只重试失败设备
+- 支持交互式Y/N确认自动回复（H3C install activate、华为 patch load）
+- 支持锐捷3步补丁流程（upgrade→active→running），每步等待100%完成
+- 死循环保护：所有while循环最多60次迭代后强制退出
+- 支持SCP/SFTP使能前置步骤
+- 保存配置时处理Y/N确认交互
 """
 
 import re
@@ -21,6 +26,9 @@ from switch_patcher.excel_io import DeviceInfo, DeviceResult, write_cell, calc_m
 
 logger = logging.getLogger(__name__)
 
+# 死循环保护：while True循环最大迭代次数，防止设备输出异常导致无限等待
+MAX_LOOP_ITERATIONS = 60
+
 
 def execute_device(
     device: DeviceInfo,
@@ -36,6 +44,7 @@ def execute_device(
     save_after_apply: bool = False,
     cpu_threshold: float = 90.0,
     mem_threshold: float = 90.0,
+    enable_scp: bool = True,
 ) -> DeviceResult:
     """
     执行单台设备的完整补丁流程
@@ -46,6 +55,7 @@ def execute_device(
     - run_id: 本次执行批次ID（用于日志和回退文件命名）
     - dry_run: 预检查模式，只做健康检查不实际操作
     - save_after_apply: 激活后是否自动保存配置
+    - enable_scp: 是否在文件传输前自动启用SCP/SFTP服务
     - 返回: DeviceResult对象
     """
     result = DeviceResult(
@@ -162,6 +172,28 @@ def execute_device(
         logger.info(f"[{device.hostname}] File already uploaded, skipping transfer")
         result.transfer_ok = True
     else:
+        # 如果需要，先启用SCP/SFTP服务
+        if enable_scp and profile.scp_enable_commands:
+            logger.info(f"[{device.hostname}] Enabling SCP/SFTP services before transfer")
+            scp_conn = None
+            for attempt in range(1, 4):
+                try:
+                    scp_conn = create_connection(device, profile, username, password, ssh_port, timeout)
+                    break
+                except ConnectionError:
+                    if attempt == 3:
+                        logger.error(f"[{device.hostname}] Cannot connect for SCP enable")
+                        break
+                    time.sleep(3)
+
+            if scp_conn:
+                try:
+                    _enable_scp_sftp(scp_conn, profile)
+                except Exception as e:
+                    logger.warning(f"[{device.hostname}] SCP enable failed (may already be enabled): {e}")
+                finally:
+                    scp_conn.disconnect()
+
         # 构造远端路径并上传
         remote_path = f"{profile.remote_dir}{device.patch_file}"
         upload_ok = sftp_upload(
@@ -194,18 +226,18 @@ def execute_device(
                 time.sleep(3)
 
         try:
-            # 在设备端执行MD5校验命令，比对本地和远端MD5
-            verified, md5_val = verify_file_on_device(conn, profile, device.patch_file, md5_local)
+            # 在设备端执行MD5/文件大小校验命令，比对本地和远端
+            verified, verify_val = verify_file_on_device(conn, profile, device.patch_file, md5_local)
             if verified:
                 write_cell(excel_path, device.row_index, "upload_success", "OK")
-                write_cell(excel_path, device.row_index, "md5_uploaded", md5_val)
+                write_cell(excel_path, device.row_index, "md5_uploaded", verify_val)
                 result.transfer_ok = True
             else:
-                # MD5不匹配，文件可能损坏，不进入激活阶段
+                # 校验不匹配，文件可能损坏，不进入激活阶段
                 write_cell(excel_path, device.row_index, "upload_success", "FAIL-MD5")
                 write_cell(excel_path, device.row_index, "update_result", "FAIL-MD5")
                 result.status = "failed"
-                result.error_message = f"MD5 verification failed: {md5_val}"
+                result.error_message = f"File verification failed: {verify_val}"
                 result.start_time = start_time
                 result.end_time = datetime.now()
                 return result
@@ -256,8 +288,17 @@ def execute_device(
             formatted = format_command(cmd.command, patch_file=device.patch_file, patch_id=device.patch_file)
             logger.info(f"[{device.hostname}] Executing: {formatted}")
             try:
-                # 逐条发送命令，不自动退出配置模式，以便发送下一条
-                output = conn.send_config_set([formatted], exit_config_mode=False, read_timeout=120)
+                # 根据命令类型选择不同执行方式
+                if cmd.wait_progress:
+                    # 锐捷3步流程：等待进度100%完成
+                    output = _send_command_wait_progress(conn, formatted, cmd)
+                elif cmd.expect_pattern:
+                    # 交互式命令：H3C install activate、华为 patch load 会提示Y/N确认
+                    output = _send_command_interactive(conn, formatted, cmd)
+                else:
+                    # 普通命令：直接发送
+                    output = conn.send_config_set([formatted], exit_config_mode=False, read_timeout=120)
+
                 # 检查输出中是否包含错误模式
                 has_error = any(re.search(pat, output, re.IGNORECASE) for pat in profile.error_patterns)
                 if has_error:
@@ -278,7 +319,7 @@ def execute_device(
         # 默认不保存配置，给人工验证留窗口期
         if save_after_apply:
             logger.info(f"[{device.hostname}] Saving configuration...")
-            conn.save_config()
+            _save_config(conn, profile)
     except Exception as e:
         logger.error(f"[{device.hostname}] Activate phase exception: {e}")
     finally:
@@ -350,6 +391,154 @@ def execute_device(
     result.start_time = start_time
     result.end_time = datetime.now()
     return result
+
+
+def _send_command_interactive(conn, command: str, cmd) -> str:
+    """
+    发送交互式命令（自动处理Y/N确认提示）
+    - 先发送命令，然后检测输出中是否出现expect_pattern
+    - 如果匹配到确认提示，自动回复auto_reply（如"Y"）
+    - 使用死循环保护（最多60次迭代）
+    - 适用于H3C的install activate和华为的patch load命令
+    """
+    # 发送命令但不等待完成（可能需要交互）
+    conn.write_channel(command + "\n")
+    output = ""
+    loop_count = 0
+
+    while loop_count < MAX_LOOP_ITERATIONS:
+        loop_count += 1
+        time.sleep(0.5)
+        # 读取当前可用输出
+        new_output = conn.read_channel()
+        output += new_output
+
+        # 检查是否出现确认提示（如[Y/N]或(y/n)）
+        if cmd.expect_pattern and re.search(cmd.expect_pattern, output):
+            logger.info(f"Detected confirmation prompt, auto-replying: {cmd.auto_reply}")
+            conn.write_channel(cmd.auto_reply + "\n")
+            # 继续等待命令执行完成
+            output += conn.read_until_prompt(read_timeout=120)
+            break
+
+        # 检查是否已出现命令提示符（命令已执行完毕）
+        if conn.find_prompt() in output:
+            break
+
+        # 死循环保护：超过最大迭代次数强制退出
+        if loop_count >= MAX_LOOP_ITERATIONS:
+            logger.warning(f"Interactive command loop limit reached ({MAX_LOOP_ITERATIONS}), forcing exit")
+            break
+
+    return output
+
+
+def _send_command_wait_progress(conn, command: str, cmd) -> str:
+    """
+    发送需要等待进度100%完成的命令（锐捷特有）
+    - 发送命令后持续读取输出，检测进度百分比
+    - 当输出中出现complete_pattern（如"100%"）时认为完成
+    - 使用死循环保护（最多60次迭代，每次等待2秒，总计约2分钟）
+    - 适用于锐捷的upgrade/patch active/patch running命令
+    """
+    # 发送命令
+    conn.write_channel(command + "\n")
+    output = ""
+    loop_count = 0
+
+    while loop_count < MAX_LOOP_ITERATIONS:
+        loop_count += 1
+        time.sleep(2)
+        new_output = conn.read_channel()
+        output += new_output
+
+        # 检查进度百分比是否达到100%
+        if cmd.complete_pattern and re.search(cmd.complete_pattern, output):
+            logger.info(f"Progress completed: detected '{cmd.complete_pattern}' in output")
+            # 等待命令提示符出现
+            output += conn.read_until_prompt(read_timeout=30)
+            break
+
+        # 记录当前进度（用于调试）
+        if cmd.progress_pattern:
+            progress_matches = re.findall(cmd.progress_pattern, output)
+            if progress_matches:
+                logger.debug(f"Current progress: {progress_matches[-1]}")
+
+        # 死循环保护：超过最大迭代次数强制退出
+        if loop_count >= MAX_LOOP_ITERATIONS:
+            logger.warning(f"Progress wait loop limit reached ({MAX_LOOP_ITERATIONS}), forcing exit")
+            break
+
+    return output
+
+
+def _enable_scp_sftp(conn, profile: VendorProfile) -> None:
+    """
+    在设备上启用SCP/SFTP服务（补丁文件传输的前置条件）
+    - H3C: system-view → scp server enable → sftp server enable
+    - 华为: system-view → scp server enable → sftp server enable → commit
+    - 锐捷: configure terminal → ip scp server enable
+    - 执行完成后自动保存配置
+    """
+    for scp_cmd in profile.scp_enable_commands:
+        formatted = format_command(scp_cmd.command)
+        logger.info(f"Enabling SCP/SFTP: {formatted}")
+        conn.send_command(formatted, read_timeout=30)
+
+    # SCP使能后保存配置（处理Y/N确认交互）
+    _save_config(conn, profile)
+
+
+def _save_config(conn, profile: VendorProfile) -> None:
+    """
+    保存设备配置，自动处理Y/N确认交互
+    - H3C: save force（无交互）
+    - 华为: save → 提示[Y/N] → 自动回答Y
+    - 锐捷: write → 提示[Y/N] → 自动回答Y
+    - 使用死循环保护（最多60次迭代）
+    """
+    save_cmd = profile.save
+    if not save_cmd:
+        return
+
+    logger.info(f"Saving config: {save_cmd}")
+
+    # 如果命令中包含force（如H3C的save force），无需交互
+    if "force" in save_cmd.lower():
+        conn.send_command(save_cmd, read_timeout=60)
+        return
+
+    # 其他厂商的save/write命令会提示确认，需要交互处理
+    conn.write_channel(save_cmd + "\n")
+    output = ""
+    loop_count = 0
+
+    while loop_count < MAX_LOOP_ITERATIONS:
+        loop_count += 1
+        time.sleep(0.5)
+        new_output = conn.read_channel()
+        output += new_output
+
+        # 检查是否出现Y/N确认提示
+        if re.search(r"[Yy]/[Nn]", output):
+            logger.info("Detected save confirmation prompt, auto-replying: Y")
+            conn.write_channel("Y\n")
+            # 等待保存完成
+            try:
+                output += conn.read_until_prompt(read_timeout=120)
+            except Exception:
+                pass
+            break
+
+        # 检查是否已出现命令提示符（保存已完成）
+        if conn.find_prompt() in output:
+            break
+
+        # 死循环保护
+        if loop_count >= MAX_LOOP_ITERATIONS:
+            logger.warning(f"Save config loop limit reached ({MAX_LOOP_ITERATIONS}), forcing exit")
+            break
 
 
 def _find_rollback_cmd(profile: VendorProfile, activate_cmd: str, patch_file: str) -> str:

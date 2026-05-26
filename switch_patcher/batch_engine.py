@@ -34,12 +34,14 @@ def run_batch(
     mem_threshold: float = 90.0,
     max_workers: int = 5,
     skip_uploaded: bool = False,
+    enable_scp: bool = True,
 ) -> list[DeviceResult]:
     """
     批量执行补丁流程
     - devices: 设备信息列表
     - max_workers: 最大并发线程数
     - skip_uploaded: 跳过已上传文件成功的设备
+    - enable_scp: 在文件传输前自动启用SCP/SFTP服务
     - 返回: 所有设备的执行结果列表
     """
     # 生成批次ID，用于日志文件和回退文件命名
@@ -94,6 +96,7 @@ def run_batch(
             save_after_apply=save_after_apply,
             cpu_threshold=cpu_threshold,
             mem_threshold=mem_threshold,
+            enable_scp=enable_scp,
         )
 
         with progress_lock:
