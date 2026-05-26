@@ -150,14 +150,21 @@ patches/
 | patch_file | 补丁文件名 | 人工填写 |
 | patch1_md5_base | 本地补丁文件MD5 | **工具回写** |
 | patch1_md5_uploaded | 设备端文件MD5 | **工具回写** |
-| scp_status | SCP/SFTP服务状态（none/scp/sftp/scp_sftp） | **工具回写** |
-| login_mode | 登录状态（OK/FAIL/UNREACHABLE） | **工具回写** |
+| scp_status | 设备连接与服务状态 | **工具回写** |
 | upload_success | 上传状态（OK/FAIL） | **工具回写** |
 | update_result | 升级结果（SUCCESS/PARTIAL/FAIL-xxx） | **工具回写** |
 
-人工只需填写前6列（Hostname ~ patch_file），后6列由工具在执行过程中逐步回写。
+人工只需填写前6列（Hostname ~ patch_file），后5列由工具在执行过程中逐步回写。
 
-`scp_status`列控制SCP/SFTP开启流程：工具先检查该字段，为空则登录设备检查；如果值为"none"则执行开启；已有"scp"/"sftp"/"scp_sftp"则自动跳过。
+`scp_status` 合并了原 `login_mode` 字段，一个字段同时表达连接状态和服务状态：
+
+| scp_status 值 | 含义 |
+|---|---|
+| `scp` / `sftp` / `scp_sftp` | SCP/SFTP已开启（隐含登录OK） |
+| `none` | SCP/SFTP未开启（隐含登录OK，需要执行开启） |
+| `unreachable` | 设备不可达（TCP探测失败） |
+| `login_fail` | SSH登录失败（3次重试后仍失败） |
+| 空 | 未检查，需要执行步骤1 |
 
 **灰度分批**：在Excel中创建多个Sheet（如 `batch1`、`batch2`、`batch3`），每批放入部分设备行，执行时通过 `--sheet` 参数指定批次。
 
@@ -434,7 +441,7 @@ python -m switch_patcher [input] [options]
 步骤1: check_scp — 检查SCP/SFTP状态
   │  登录设备执行check_scp_commands
   │  检测输出中的scp server enable / sftp server enable关键字
-  │  写入scp_status列: scp / sftp / scp_sftp / none
+  │  写入scp_status列: scp / sftp / scp_sftp / none / unreachable / login_fail
   │  已有scp_status的设备自动跳过
   ▼
 步骤2: open_scp — 开启SCP/SFTP服务
@@ -447,13 +454,13 @@ python -m switch_patcher [input] [options]
   │  更新scp_status列
   ▼
 步骤4: upload — 上传补丁文件
-  │  只对upload_success≠OK且scp_status≠none的设备执行
+  │  只对upload_success≠OK且scp_status为scp/sftp/scp_sftp的设备执行
   │  本地文件校验 → TCP连通性检查 → SFTP上传 → 设备端MD5/大小校验
   │  校验通过 → 写upload_success=OK
   │  校验失败 → 写upload_success=FAIL，不进入激活
   ▼
 步骤5: activate — 激活补丁（--dry-run到此结束）
-  │  只对upload_success=OK且update_result≠SUCCESS的设备执行
+  │  只对upload_success=OK且update_result≠SUCCESS且scp_status不为unreachable/login_fail的设备执行
   │  预检查：健康检查 + 阈值判断
   │  进入config模式，逐条执行activate命令
   │  交互式命令自动回复Y/N，锐捷3步等待进度100%
@@ -484,6 +491,8 @@ python -m switch_patcher [input] [options]
 |---|---|
 | `scp_status` 已有值（scp/sftp/scp_sftp） | 跳过SCP检查和开启步骤 |
 | `scp_status=none` | 执行SCP/SFTP开启命令 |
+| `scp_status=unreachable` | 跳过该设备（下次重试时如果恢复会重新检查） |
+| `scp_status=login_fail` | 跳过该设备（下次重试时重新尝试3次登录） |
 | `upload_success=OK` | 跳过文件上传步骤 |
 | `upload_success=FAIL` | 重新上传补丁文件 |
 | `update_result=SUCCESS` | 跳过补丁激活步骤 |

@@ -28,7 +28,6 @@ COLUMN_MAP = {
     "md5_base": "patch1_md5_base",
     "md5_uploaded": "patch1_md5_uploaded",
     "scp_status": "scp_status",
-    "login_mode": "login_mode",
     "upload_success": "upload_success",
     "update_result": "update_result",
 }
@@ -43,12 +42,16 @@ class DeviceInfo:
     patch_file: str
     row_index: int          # 在Excel中的行号（1-based），用于回写定位
     excel_path: str = ""    # Excel文件路径（回写时需要，由batch_engine注入）
+    sheet_name: str = ""    # Excel Sheet名称（回写时需要，由batch_engine注入）
     patch_now: str = ""     # 当前补丁版本（工具回写）
     patch_new: str = ""     # 目标补丁版本（工具回写）
     md5_base: str = ""      # 本地补丁文件MD5（工具回写）
     md5_uploaded: str = ""   # 设备端文件MD5（工具回写）
-    scp_status: str = ""    # SCP/SFTP服务状态：none/scp/sftp/scp_sftp（工具回写）
-    login_mode: str = ""    # 登录状态（工具回写）
+    scp_status: str = ""    # 设备连接与服务状态（工具回写）：
+                            #   scp/sftp/scp_sftp = SCP/SFTP已开启（隐含登录OK）
+                            #   none = 未开启（隐含登录OK）
+                            #   unreachable = 设备不可达
+                            #   login_fail = SSH登录失败
     upload_success: str = ""  # 上传状态（工具回写）
     update_result: str = ""   # 升级结果（工具回写）
 
@@ -108,6 +111,9 @@ def read_devices(excel_path: str, sheet_name: str | None = None) -> list[DeviceI
         if h and h in COLUMN_MAP.values():
             col_indices[h] = idx
 
+    # 记住实际使用的Sheet名称，供回写时定位
+    actual_sheet = sheet_name or ws.title
+
     devices = []
     for row_idx in range(2, ws.max_row + 1):
         hostname = ws.cell(row=row_idx, column=col_indices.get("Hostname", 1)).value
@@ -115,8 +121,8 @@ def read_devices(excel_path: str, sheet_name: str | None = None) -> list[DeviceI
         vendor = ws.cell(row=row_idx, column=col_indices.get("Vendor", 3)).value
         patch_file = ws.cell(row=row_idx, column=col_indices.get("patch_file", 6)).value
         patch_now = ws.cell(row=row_idx, column=col_indices.get("patch_now", 4)).value
-        upload_success = ws.cell(row=row_idx, column=col_indices.get("upload_success", 11)).value
-        update_result = ws.cell(row=row_idx, column=col_indices.get("update_result", 12)).value
+        upload_success = ws.cell(row=row_idx, column=col_indices.get("upload_success", 10)).value
+        update_result = ws.cell(row=row_idx, column=col_indices.get("update_result", 11)).value
         scp_status = ws.cell(row=row_idx, column=col_indices.get("scp_status", 9)).value
 
         # 跳过空行
@@ -133,18 +139,20 @@ def read_devices(excel_path: str, sheet_name: str | None = None) -> list[DeviceI
             upload_success=str(upload_success).strip() if upload_success else "",
             update_result=str(update_result).strip() if update_result else "",
             scp_status=str(scp_status).strip() if scp_status else "",
+            sheet_name=actual_sheet,
         ))
 
     wb.close()
     return devices
 
 
-def write_cell(excel_path: str, row_index: int, col_name: str, value: str):
+def write_cell(excel_path: str, row_index: int, col_name: str, value: str, sheet_name: str | None = None):
     """
     回写单个单元格到Excel（线程安全）
     - row_index: Excel行号
-    - col_name: 内部列名（如"login_mode"）
+    - col_name: 内部列名（如"scp_status"）
     - value: 要写入的值
+    - sheet_name: 目标Sheet名称，为None时使用活动Sheet
     """
     col_key = COLUMN_MAP.get(col_name)
     if not col_key:
@@ -152,7 +160,7 @@ def write_cell(excel_path: str, row_index: int, col_name: str, value: str):
 
     with LOCK:
         wb = openpyxl.load_workbook(excel_path)
-        ws = wb.active
+        ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
 
         # 查找列号，若列不存在则自动追加
         headers = [cell.value for cell in ws[1]]

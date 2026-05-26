@@ -26,19 +26,24 @@ logger = logging.getLogger(__name__)
 MAX_LOOP_ITERATIONS = 60
 
 
+def _write(device: DeviceInfo, col_name: str, value: str):
+    """回写Excel的简写，自动带上excel_path和sheet_name"""
+    write_cell(device.excel_path, device.row_index, col_name, value,
+               sheet_name=device.sheet_name)
+
+
 def _connect_with_retry(device, profile, username, password, ssh_port, timeout, max_retries=3):
     """SSH登录重试（最多3次，间隔3秒），返回连接对象或None"""
     for attempt in range(1, max_retries + 1):
         try:
             conn = create_connection(device, profile, username, password, ssh_port, timeout)
-            write_cell(device.excel_path, device.row_index, "login_mode", "OK")
             logger.info(f"[{device.hostname}] SSH login OK (attempt {attempt})")
             return conn
         except ConnectionError as e:
             logger.warning(f"[{device.hostname}] SSH login attempt {attempt}/{max_retries} failed: {e}")
             if attempt == max_retries:
-                write_cell(device.excel_path, device.row_index, "login_mode", "FAIL")
-                write_cell(device.excel_path, device.row_index, "update_result", "FAIL-LOGIN")
+                _write(device, "scp_status", "login_fail")
+                _write(device, "update_result", "FAIL-LOGIN")
                 return None
             time.sleep(3)
 
@@ -48,25 +53,31 @@ def step_check_scp(device: DeviceInfo, profile: VendorProfile, **kwargs) -> str:
     步骤1: 检查设备SCP/SFTP服务状态
     - 登录设备，执行check_scp_commands中的命令
     - 将结果写入Excel scp_status列
-    - 返回: 'scp'/'sftp'/'scp_sftp'/'none'/'FAIL'
+    - 返回: 'scp'/'sftp'/'scp_sftp'/'none'/'unreachable'/'login_fail'
     """
     username = kwargs.get("username", "")
     password = kwargs.get("password", "")
     ssh_port = kwargs.get("ssh_port", 22)
     timeout = kwargs.get("timeout", 30)
 
+    # 先TCP探测
+    if not check_connectivity(device.mgmt_ip, ssh_port):
+        _write(device, "scp_status", "unreachable")
+        _write(device, "update_result", "FAIL-UNREACHABLE")
+        return "unreachable"
+
     conn = _connect_with_retry(device, profile, username, password, ssh_port, timeout)
     if not conn:
-        return "FAIL"
+        return "login_fail"
 
     try:
         status = check_scp_sftp(conn, profile)
-        write_cell(device.excel_path, device.row_index, "scp_status", status)
+        _write(device, "scp_status", status)
         logger.info(f"[{device.hostname}] SCP/SFTP status: {status}")
         return status
     except Exception as e:
         logger.error(f"[{device.hostname}] Check SCP failed: {e}")
-        write_cell(device.excel_path, device.row_index, "scp_status", "none")
+        _write(device, "scp_status", "none")
         return "none"
     finally:
         conn.disconnect()
@@ -95,7 +106,6 @@ def step_enable_scp(device: DeviceInfo, profile: VendorProfile, **kwargs) -> boo
             logger.info(f"[{device.hostname}] Enabling: {formatted}")
             conn.send_command(formatted, read_timeout=30)
 
-        # 使能后保存配置（处理Y/N交互）
         _save_config(conn, profile)
         logger.info(f"[{device.hostname}] SCP/SFTP enabled and saved")
         return True
@@ -125,47 +135,47 @@ def step_upload(device: DeviceInfo, profile: VendorProfile, **kwargs) -> bool:
     local_patch_path = Path(patches_dir) / device.patch_file
     if not local_patch_path.exists():
         logger.error(f"[{device.hostname}] Patch file not found: {local_patch_path}")
-        write_cell(device.excel_path, device.row_index, "update_result", "FAIL-NOFILE")
+        _write(device, "update_result", "FAIL-NOFILE")
         return False
 
     md5_local = calc_md5(str(local_patch_path))
-    write_cell(device.excel_path, device.row_index, "md5_base", md5_local)
+    _write(device, "md5_base", md5_local)
 
     # 连通性检查
     if not check_connectivity(device.mgmt_ip, ssh_port):
         logger.error(f"[{device.hostname}] Device unreachable")
-        write_cell(device.excel_path, device.row_index, "login_mode", "UNREACHABLE")
-        write_cell(device.excel_path, device.row_index, "update_result", "FAIL-UNREACHABLE")
+        _write(device, "scp_status", "unreachable")
+        _write(device, "update_result", "FAIL-UNREACHABLE")
         return False
 
     # SFTP上传
     remote_path = f"{profile.remote_dir}{device.patch_file}"
     upload_ok = sftp_upload(device, profile, str(local_patch_path), remote_path, username, password, ssh_port)
     if not upload_ok:
-        write_cell(device.excel_path, device.row_index, "upload_success", "FAIL")
-        write_cell(device.excel_path, device.row_index, "update_result", "FAIL-UPLOAD")
+        _write(device, "upload_success", "FAIL")
+        _write(device, "update_result", "FAIL-UPLOAD")
         return False
 
     # 上传后重连校验文件完整性
     conn = _connect_with_retry(device, profile, username, password, ssh_port, timeout)
     if not conn:
-        write_cell(device.excel_path, device.row_index, "upload_success", "FAIL-VERIFY")
+        _write(device, "upload_success", "FAIL-VERIFY")
         return False
 
     try:
         verified, verify_val = verify_file_on_device(conn, profile, device.patch_file, md5_local)
         if verified:
-            write_cell(device.excel_path, device.row_index, "upload_success", "OK")
-            write_cell(device.excel_path, device.row_index, "md5_uploaded", verify_val)
+            _write(device, "upload_success", "OK")
+            _write(device, "md5_uploaded", verify_val)
             logger.info(f"[{device.hostname}] Upload verified OK")
             return True
         else:
-            write_cell(device.excel_path, device.row_index, "upload_success", "FAIL-MD5")
-            write_cell(device.excel_path, device.row_index, "update_result", "FAIL-MD5")
+            _write(device, "upload_success", "FAIL-MD5")
+            _write(device, "update_result", "FAIL-MD5")
             return False
     except Exception as e:
         logger.error(f"[{device.hostname}] Verify exception: {e}")
-        write_cell(device.excel_path, device.row_index, "upload_success", "FAIL-VERIFY")
+        _write(device, "upload_success", "FAIL-VERIFY")
         return False
     finally:
         conn.disconnect()
@@ -205,18 +215,17 @@ def step_activate(device: DeviceInfo, profile: VendorProfile, **kwargs) -> Devic
         return result
 
     try:
-        # 预检查
         health_before = run_health_checks(conn, profile)
         result.cpu_before = health_before.cpu_percent
         result.mem_before = health_before.mem_percent
         result.patch_now = health_before.patch_id or ""
-        write_cell(device.excel_path, device.row_index, "patch_now", result.patch_now)
-        write_cell(device.excel_path, device.row_index, "patch_new", device.patch_file)
+        _write(device, "patch_now", result.patch_now)
+        _write(device, "patch_new", device.patch_file)
 
         ok, reason = check_thresholds(health_before, cpu_threshold, mem_threshold)
         if not ok:
             logger.warning(f"[{device.hostname}] Pre-check threshold: {reason}")
-            write_cell(device.excel_path, device.row_index, "update_result", f"SKIP-{reason}")
+            _write(device, "update_result", f"SKIP-{reason}")
             result.status = "skipped"
             result.error_message = reason
             result.start_time = start_time
@@ -227,7 +236,7 @@ def step_activate(device: DeviceInfo, profile: VendorProfile, **kwargs) -> Devic
         logger.info(f"[{device.hostname}] Pre-check OK: CPU={health_before.cpu_percent}%, MEM={health_before.mem_percent}%")
     except Exception as e:
         logger.error(f"[{device.hostname}] Pre-check exception: {e}")
-        write_cell(device.excel_path, device.row_index, "update_result", "FAIL-PRECHECK")
+        _write(device, "update_result", "FAIL-PRECHECK")
         result.status = "failed"
         result.error_message = str(e)
         result.start_time = start_time
@@ -239,7 +248,7 @@ def step_activate(device: DeviceInfo, profile: VendorProfile, **kwargs) -> Devic
     # 预检查模式到此结束
     if dry_run:
         logger.info(f"[{device.hostname}] Dry-run complete")
-        write_cell(device.excel_path, device.row_index, "update_result", "DRYRUN-OK")
+        _write(device, "update_result", "DRYRUN-OK")
         result.status = "skipped"
         result.start_time = start_time
         result.end_time = datetime.now()
@@ -248,7 +257,7 @@ def step_activate(device: DeviceInfo, profile: VendorProfile, **kwargs) -> Devic
     # 重新连接激活补丁
     conn = _connect_with_retry(device, profile, username, password, ssh_port, timeout)
     if not conn:
-        write_cell(device.excel_path, device.row_index, "update_result", "FAIL-ACTIVATE-LOGIN")
+        _write(device, "update_result", "FAIL-ACTIVATE-LOGIN")
         result.status = "failed"
         result.error_message = "Cannot reconnect for activation"
         result.start_time = start_time
@@ -315,13 +324,13 @@ def step_activate(device: DeviceInfo, profile: VendorProfile, **kwargs) -> Devic
     # 最终状态判定
     if result.commands_applied > 0 and result.commands_failed == 0:
         result.status = "success"
-        write_cell(device.excel_path, device.row_index, "update_result", "SUCCESS")
+        _write(device, "update_result", "SUCCESS")
     elif result.commands_applied > 0:
         result.status = "partial"
-        write_cell(device.excel_path, device.row_index, "update_result", "PARTIAL")
+        _write(device, "update_result", "PARTIAL")
     else:
         result.status = "failed"
-        write_cell(device.excel_path, device.row_index, "update_result", "FAIL-ACTIVATE")
+        _write(device, "update_result", "FAIL-ACTIVATE")
 
     result.patch_new = device.patch_file
     result.start_time = start_time

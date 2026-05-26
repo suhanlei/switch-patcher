@@ -117,48 +117,50 @@ def run_batch(
     devices = read_devices(excel_path, sheet_name)
     logger.info(f"Loaded {len(devices)} devices from '{sheet_name or 'default'}' sheet")
 
-    # 只对scp_status为空的设备检查（已检查过的跳过）
-    need_check = [d for d in devices if not d.scp_status]
-    # 临时保存excel_path到device对象（step函数需要）
-    for d in need_check:
+    # 注入excel_path（sheet_name在read_devices时已填入）
+    for d in devices:
         d.excel_path = excel_path
+
+    # 只对scp_status为空的设备检查（已检查过的跳过，包括unreachable/login_fail）
+    need_check = [d for d in devices if not d.scp_status]
 
     _run_step("check_scp", need_check, step_check_scp, {})
 
     # ========== 步骤2: 开启SCP/SFTP（仅scp_status=none的设备） ==========
     devices = read_devices(excel_path, sheet_name)
-    need_open = [d for d in devices if d.scp_status.lower() in ("none", "")]
-    for d in need_open:
+    for d in devices:
         d.excel_path = excel_path
+    need_open = [d for d in devices if d.scp_status.lower() == "none"]
 
     _run_step("open_scp", need_open, step_enable_scp, {})
 
     # ========== 步骤3: 再次检查确认已开启 ==========
     devices = read_devices(excel_path, sheet_name)
-    need_recheck = [d for d in devices if d.scp_status.lower() in ("none", "")]
-    for d in need_recheck:
+    for d in devices:
         d.excel_path = excel_path
+    need_recheck = [d for d in devices if d.scp_status.lower() == "none"]
 
     _run_step("recheck_scp", need_recheck, step_check_scp, {})
 
     # ========== 步骤4: 上传补丁文件 ==========
     devices = read_devices(excel_path, sheet_name)
+    for d in devices:
+        d.excel_path = excel_path
     need_upload = [d for d in devices
                    if d.upload_success.upper() != "OK"
-                   and d.scp_status.lower() != "none"
+                   and d.scp_status.lower() not in ("none", "unreachable", "login_fail")
                    and d.update_result.upper() != "SUCCESS"]
-    for d in need_upload:
-        d.excel_path = excel_path
 
     _run_step("upload", need_upload, step_upload, {"patches_dir": patches_dir})
 
     # ========== 步骤5: 激活补丁 ==========
     devices = read_devices(excel_path, sheet_name)
+    for d in devices:
+        d.excel_path = excel_path
     need_activate = [d for d in devices
                      if d.upload_success.upper() == "OK"
-                     and d.update_result.upper() != "SUCCESS"]
-    for d in need_activate:
-        d.excel_path = excel_path
+                     and d.update_result.upper() != "SUCCESS"
+                     and d.scp_status.lower() not in ("unreachable", "login_fail")]
 
     step_results = _run_step("activate", need_activate, step_activate, {
         "dry_run": dry_run,
@@ -171,8 +173,9 @@ def run_batch(
     all_results.extend(step_results)
 
     # ========== 步骤6: 汇总报告 ==========
-    # 将已成功/已跳过的设备也加入报告
     devices = read_devices(excel_path, sheet_name)
+    for d in devices:
+        d.excel_path = excel_path
     for d in devices:
         if d.update_result.upper() == "SUCCESS" and not any(r.hostname == d.hostname for r in all_results):
             all_results.append(DeviceResult(
