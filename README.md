@@ -179,7 +179,14 @@ vendor: H3C
 # H3C设备display输出量大，需要40MB大接收缓冲区
 recv_buffer_size: 40960000
 
-# SCP/SFTP前置使能命令（文件传输前需确保设备已启用）
+# SCP/SFTP状态检查命令（先确认设备是否已开启，再决定是否需要执行使能）
+check_scp_commands:
+  - command: "display cur | in scp"
+    key: scp
+  - command: "display cur | in sftp"
+    key: sftp
+
+# SCP/SFTP前置使能命令（仅对scp_status=none的设备执行）
 scp_enable_commands:
   - command: system-view
   - command: scp server enable
@@ -223,6 +230,14 @@ verify_method: md5
 ```yaml
 vendor: Huawei
 
+# SCP/SFTP状态检查命令
+check_scp_commands:
+  - command: "display cur | in scp"
+    key: scp
+  - command: "display cur | in sftp"
+    key: sftp
+
+# SCP/SFTP前置使能命令（仅对scp_status=none的设备执行）
 scp_enable_commands:
   - command: system-view
   - command: scp server enable
@@ -267,6 +282,14 @@ vendor: Ruijie
 # 锐捷设备连接前需等待1秒（限速保护）
 connect_delay: 1
 
+# SCP/SFTP状态检查命令
+check_scp_commands:
+  - command: "show run | in scp server"
+    key: scp
+  - command: "show run | in sftp server"
+    key: sftp
+
+# SCP/SFTP前置使能命令（仅对scp_status=none的设备执行）
 scp_enable_commands:
   - command: configure terminal
   - command: ip scp server enable
