@@ -82,6 +82,7 @@ class VendorProfile:
     remote_dir: str                          # 设备端补丁存放目录
     recv_buffer_size: int = 409600           # SSH接收缓冲区字节数
     connect_delay: float = 0                  # 连接前等待秒数
+    config_mode_required: bool = True        # 激活命令是否需要进入config模式
     pre_check: List[CheckCommand] = field(default_factory=list)       # 补丁前健康检查命令列表
     activate: List[ActivateCommand] = field(default_factory=list)     # 补丁激活命令列表
     post_check: List[CheckCommand] = field(default_factory=list)       # 补丁后健康检查命令列表
@@ -155,6 +156,7 @@ def load_profile(vendor: str, templates_dir: Optional[Path] = None) -> VendorPro
         remote_dir=data["remote_dir"],
         recv_buffer_size=data.get("recv_buffer_size", 409600),
         connect_delay=data.get("connect_delay", 0),
+        config_mode_required=data.get("config_mode_required", True),
         pre_check=_parse_check_list(data.get("pre_check", [])),
         activate=_parse_activate_list(data.get("activate", [])),
         post_check=_parse_check_list(data.get("post_check", [])),
@@ -169,6 +171,6 @@ def load_profile(vendor: str, templates_dir: Optional[Path] = None) -> VendorPro
     )
 
 
-def format_command(template: str, patch_file: str = "", patch_id: str = "") -> str:
+def format_command(template: str, patch_file: str = "", patch_id: str = "", patch_old: str = "") -> str:
     """将命令模板中的占位符替换为实际值"""
-    return template.replace("{patch_file}", patch_file).replace("{patch_id}", patch_id)
+    return template.replace("{patch_file}", patch_file).replace("{patch_id}", patch_id).replace("{patch_old}", patch_old)

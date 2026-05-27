@@ -1,10 +1,12 @@
 vendor: H3C
 netmiko_type: hp_comware
-remote_dir: "flash:/"
+remote_dir: "/"
 # H3C设备display输出量大，需要更大的接收缓冲区（40MB，其他厂商仅400KB）
 recv_buffer_size: 40960000
+# H3C的install/patch命令在用户视图执行，不需要进入config模式
+config_mode_required: false
 
-# SCP/SFTP状态检查命令（先确认设备是否已开启，再决定是否需要执行使能）
+# SCP/SFTP状态检查命令
 check_scp_commands:
   - command: "display cur | in scp"
     key: scp
@@ -20,46 +22,51 @@ scp_enable_commands:
   - command: sftp server enable
     description: 启用SFTP服务
 
+# Comware V7/V9 使用 display install 命令族查看补丁状态
 pre_check:
-  - command: display patch information
+  - command: display install active
     key: patch_info
   - command: display device
     key: device
 
+# Comware V7/V9 补丁安装流程：activate → commit
+# - install activate patch 对所有槽位激活补丁，立即生效，需确认Y
+# - install commit 将补丁注册到启动配置，确保重启后补丁不丢失（必须执行）
+# - Y/N确认由工具全局自动处理，无需逐条配置
 activate:
-  - command: "install activate patch flash:/{patch_file}"
-    description: 激活补丁（交互式，需确认Y）
-    # H3C install activate命令会提示"Continue?[Y/N]:", 需自动回答Y
-    expect_pattern: "[Yy]/[Nn]"
-    auto_reply: "Y"
+  - command: "install activate patch flash:/{patch_file} all"
+    description: 激活补丁（对所有槽位，需确认Y，等待完成）
+    wait_progress: true
   - command: install commit
-    description: 确认补丁
+    description: 提交补丁（确保重启后补丁仍生效，等待完成）
+    wait_progress: true
 
 post_check:
-  - command: display patch information
-    key: patch_info
+  - command: display install active
+    key: patch_active
+  - command: display install committed
+    key: patch_committed
 
 rollback:
-  - command: "install deactivate patch flash:/{patch_file}"
-    description: 去激活补丁
+  # H3C可直接activate旧补丁回退，无需先deactivate新补丁
+  - command: "install activate patch flash:/{patch_old} all"
+    description: 激活旧补丁（对所有槽位，直接回退到旧版本）
   - command: install commit
-    description: 确认去激活
+    description: 提交旧补丁激活操作
   - command: "delete flash:/{patch_file}"
-    description: 删除补丁文件(可选)
+    description: 删除新补丁文件(可选)
 
 save: save force
-patch_id_pattern: "Patch name:\\s*(\\S+)"
+patch_id_pattern: '(?i)flash:/(\S*[Hh][Ss]?\d+\S*\.bin)'
 error_patterns:
-  - "Error"
+  - "^Error:"
   - "Unrecognized command"
   - "Incomplete command"
   - "Ambiguous command"
   - "Wrong parameter"
-  - "Failed to"
+  - "Failed to activate"
   - "No such file"
-  # H3C特有错误模式：补丁已激活或补丁不兼容
   - "cannot be activated again"
   - "not compliant"
 md5_command: "md5sum flash:/{patch_file}"
-# 文件校验方式：H3C使用MD5哈希值精确校验
 verify_method: md5

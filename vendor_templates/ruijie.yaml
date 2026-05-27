@@ -3,6 +3,8 @@ netmiko_type: ruijie_os
 remote_dir: "flash:/"
 # 锐捷设备默认接收缓冲区大小
 recv_buffer_size: 409600
+# 锐捷的upgrade/patch命令在用户视图执行，不需要进入config模式
+config_mode_required: false
 # 锐捷设备连接前需等待1秒（限速保护，避免过快连接导致设备拒绝）
 connect_delay: 1
 
@@ -34,18 +36,18 @@ activate:
   - command: "upgrade flash:/{patch_file}"
     description: 安装补丁（等待100%完成）
     wait_progress: true
-    progress_pattern: "\\d+%"
-    complete_pattern: "100%"
+    progress_pattern: '\d+%'
+    complete_pattern: '100%'
   - command: patch active
     description: 激活补丁（等待100%完成）
     wait_progress: true
-    progress_pattern: "\\d+%"
-    complete_pattern: "100%"
+    progress_pattern: '\d+%'
+    complete_pattern: '100%'
   - command: patch running
     description: 使补丁运行生效（等待100%完成）
     wait_progress: true
-    progress_pattern: "\\d+%"
-    complete_pattern: "100%"
+    progress_pattern: '\d+%'
+    complete_pattern: '100%'
 
 post_check:
   - command: show patch
@@ -56,13 +58,13 @@ rollback:
   - command: patch delete
     description: 删除补丁（等待100%完成）
     wait_progress: true
-    progress_pattern: "\\d+%"
-    complete_pattern: "100%"
+    progress_pattern: '\d+%'
+    complete_pattern: '100%'
   - command: "delete flash:/{patch_file}"
     description: 删除补丁文件
 
 save: write
-patch_id_pattern: "Patch name:\\s*(\\S+)"
+patch_id_pattern: 'Patch name:\s*(\S+)'
 error_patterns:
   - "% Invalid input"
   - "% Incomplete command"

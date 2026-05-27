@@ -86,7 +86,8 @@ def run_batch(
 
             # 注入公共参数
             kwargs = {**step_kwargs, "username": username, "password": password,
-                      "ssh_port": ssh_port, "timeout": timeout}
+                      "ssh_port": ssh_port, "timeout": timeout,
+                      "run_id": run_id, "logs_dir": logs_dir}
             result = step_func(device, profile, **kwargs)
 
             # step_activate 返回 DeviceResult，其他步骤返回简单值

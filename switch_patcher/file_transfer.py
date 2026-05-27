@@ -22,6 +22,18 @@ from switch_patcher.excel_io import DeviceInfo
 logger = logging.getLogger(__name__)
 
 
+def _send_cmd(conn, command: str, read_timeout: int = 120, delay_factor: float = 1.0) -> str:
+    """兼容H3C Comware设备的命令发送（优先send_command_timing）"""
+    try:
+        return conn.send_command_timing(command, read_timeout=read_timeout, delay_factor=delay_factor, max_loops=500)
+    except Exception:
+        try:
+            return conn.send_command(command, read_timeout=read_timeout, delay_factor=delay_factor, max_loops=500)
+        except Exception as e:
+            logger.warning(f"Command '{command}' failed: {e}")
+            return ""
+
+
 def check_connectivity(mgmt_ip: str, port: int = 22, timeout: int = 5) -> bool:
     """
     TCP端口探测，检查设备管理口是否可达
@@ -104,7 +116,7 @@ def verify_file_on_device(
     md5_cmd = format_command(profile.md5_command, patch_file=patch_file)
 
     try:
-        output = conn.send_command(md5_cmd, read_timeout=120)
+        output = _send_cmd(conn, md5_cmd, read_timeout=120)
 
         if verify_method == "size":
             # 华为文件大小校验：从dir命令输出中提取文件大小

@@ -3,8 +3,10 @@ netmiko_type: huawei
 remote_dir: "flash:/"
 # 华为设备默认接收缓冲区大小
 recv_buffer_size: 409600
+# 华为的patch load命令在用户视图执行，不需要进入config模式
+config_mode_required: false
 
-# SCP/SFTP状态检查命令（先确认设备是否已开启，再决定是否需要执行使能）
+# SCP/SFTP状态检查命令
 check_scp_commands:
   - command: "display cur | in scp"
     key: scp
@@ -23,42 +25,48 @@ scp_enable_commands:
     description: 提交配置（华为CE系列需要commit生效）
 
 pre_check:
-  - command: display patch information
+  - command: display patch-information
     key: patch_info
   - command: display device
     key: device
 
+# 华为CE系列补丁安装：
+# - patch load <file> all run 是推荐的一步式命令，加载+激活+运行一步完成
+# - all=对所有单板, run=加载后直接运行（合并load→active→run三步）
+# - 补丁立即生效，无需重启设备
 activate:
-  # 华为补丁使用 patch load 命令一次性完成安装并激活，all run表示对所有槽位立即生效
-  # 命令会提示确认，需自动回答Y
   - command: "patch load {patch_file} all run"
-    description: 加载并运行补丁（交互式，需确认Y）
+    description: 加载并运行补丁（对所有槽位，交互式，需确认Y）
     expect_pattern: "[Yy]/[Nn]"
     auto_reply: "Y"
 
 post_check:
-  - command: display patch information
+  - command: display patch-information
     key: patch_info
+  - command: display version
+    key: version
 
+# 华为补丁回退：需按 run→active→delete 顺序逆向操作
+# 卸载后需要重启设备才能完全生效
 rollback:
-  # 华为无法直接deactivate补丁，需要找到旧补丁文件并重新加载以覆盖
-  # 回退时需人工确认旧补丁文件已存在于flash中
-  - command: "patch deactivate {patch_id}"
+  - command: "patch run all delete"
+    description: 去运行补丁
+  - command: "patch active all delete"
     description: 去激活补丁
-  - command: "patch delete {patch_id}"
+  - command: "patch delete all"
     description: 删除补丁
   - command: "delete flash:/{patch_file}"
     description: 删除补丁文件
 
 save: save
-patch_id_pattern: "Patch name:\\s*(\\S+)"
+patch_id_pattern: 'Patch Package Version:\s*(\S+)'
 error_patterns:
-  - "Error"
+  - "^Error:"
   - "Unrecognized command"
   - "Incomplete command"
   - "Ambiguous command"
   - "Wrong parameter"
-  - "Failed"
+  - "Failed to load"
 # 华为不支持md5sum命令，通过dir查看文件大小间接验证完整性
 md5_command: "dir flash:/{patch_file}"
 # 文件校验方式：华为使用文件大小比对（设备不支持MD5命令）
